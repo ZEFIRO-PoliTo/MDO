@@ -24,7 +24,7 @@ For each project, there will be a main project folder containing:
 - Commit often. Use clear messages:
 ```bash
 git commit -m "Task2: added volume placement function"
-
+```
 ## Pull Requests
 
 - Open a PR from your `feature/` branch to `main`.
