@@ -55,14 +55,4 @@ git commit -m "Task2: added volume placement function"
 6. Merge into `main` after approval.
 7. Update time tracking sheet at each milestone or after finishing the task.
 
----
-
-## Environment Setup
-
-- **Python 3.11** → [Download](https://www.python.org/downloads/release/python-3110/)
-- **OpenVSP** → [Download](https://openvsp.org/download.html)
-- Install Python API for OpenVSP. Test by running:
-```python
-import openvsp
-print(openvsp.GetVSPVersion())
 
