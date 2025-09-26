@@ -36,11 +36,7 @@ git commit -m "Task2: added volume placement function"
 ## Time Tracking
 
 - Keep track of your hours for university credit.
-- Use the shared **Google Sheet** to log:
-  - Date
-  - Number of hours
-  - Task or subtask worked on
-  - Short comment on what was done
+- Use the format: date - hours - task - comment
 - **Tip:** update every 1–2 days for accuracy.
 
 ---
