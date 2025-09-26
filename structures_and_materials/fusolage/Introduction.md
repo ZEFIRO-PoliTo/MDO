@@ -37,11 +37,11 @@ The system returns the **best configurations** based on minimum fuselage volume 
 - [Download here](https://www.python.org/downloads/release/python-3110/)
 
 ### 2. Install OpenVSP
-- Download from [https://openvsp.org/download.html](https://openvsp.org/download.html)
+- Download from [https://openvsp.org/download.html](https://openvsp.org/download.php)
 - Follow installation instructions for your OS
 - Make sure you can open OpenVSP manually before scripting.
 
 ### 3. Install OpenVSP Python API
 Check OpenVSP documentation:
-- [Python API Guide](https://openvsp.org/wiki/doku.php?id=python)
+- [Open VSP documentation](https://openvsp.org/api_docs/latest/)
 
