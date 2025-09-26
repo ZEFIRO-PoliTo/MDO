@@ -43,7 +43,6 @@ Each task file (`TaskX_*.md`) should include:
 - Each task owner should maintain and update their own task documentation.
 - Link task documentation in this `README.md` to create an index:
 
-```markdown
 # Documentation Index
 
 - [Task 1 – Fuselage Iterator](Task1_FuselageIterator.md)
