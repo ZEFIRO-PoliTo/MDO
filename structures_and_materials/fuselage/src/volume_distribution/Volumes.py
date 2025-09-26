@@ -13,8 +13,11 @@ from dataclasses import dataclass, asdict
 # ====================
 class Config:
     """Configuration parameters for volume placement"""
-    INPUT_VSP = "input_fuse.vsp3"  # Input fuselage file
-    OUTPUT_DIR = "configs"  # Main output directory
+
+    
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__)) # Base directory
+    INPUT_VSP = os.path.join(BASE_DIR, "input_fuse.vsp3")  # Input fuselage file
+    OUTPUT_DIR = os.path.join(BASE_DIR, "configs")  # Main output directory
     NUM_CONFIGS = 10  # Number of configurations to generate
     NUM_VOLUMES = 10  # Number of volumes per configuration
 
@@ -80,39 +83,6 @@ class FuselageBounds:
         return self.radius_y * taper, self.radius_z * taper
 
 
-# ====================
-# Core Functions
-# ====================
-'''def create_simple_fuselage(length: float = 20.0,
-                           radius: float = 1.5,
-                           output_file: str = "input_fuse.vsp3"):
-    """
-    Create a simple fuselage for testing
-
-    Args:
-        length: Fuselage length
-        radius: Fuselage radius (circular cross-section)
-        output_file: Output file path
-    """
-    print("🔨 Creating base fuselage...")
-
-    vsp.ClearVSPModel()
-    fuse_id = vsp.AddGeom("FUSELAGE", "")
-
-    # Set dimensions
-    vsp.SetParmValUpdate(fuse_id, "Length", "Design", length)
-
-    # Position at origin
-    vsp.SetParmValUpdate(fuse_id, "X_Location", "XForm", 0.0)
-    vsp.SetParmValUpdate(fuse_id, "Y_Location", "XForm", 0.0)
-    vsp.SetParmValUpdate(fuse_id, "Z_Location", "XForm", 0.0)
-
-    vsp.Update()
-    vsp.WriteVSPFile(output_file, vsp.SET_ALL)
-
-    print(f"✅ Fuselage created: {output_file}")
-    print(f"   Length: {length}m, Approx. radius: {radius}m")'''
-
 
 def get_fuselage_bounds(fuse_id: str) -> FuselageBounds:
     """
@@ -130,7 +100,7 @@ def get_fuselage_bounds(fuse_id: str) -> FuselageBounds:
     # Get position
     x_pos = vsp.GetParmVal(fuse_id, "X_Location", "XForm")
 
-    # Use default radii (can be refined based on actual cross-sections)
+    # Use default radius (can be refined based on actual cross-sections)
     radius_y = Config.DEFAULT_RADIUS_Y
     radius_z = Config.DEFAULT_RADIUS_Z
 
@@ -232,22 +202,30 @@ def generate_ellipsoid_position(bounds: FuselageBounds,
 
     return None
 
+def volumes_collide(v1: EllipsoidVolume, v2: EllipsoidVolume) -> bool:
+    """Check if two ellipsoid volumes collide (approx as spheres)"""
+    dx = v1.x - v2.x
+    dy = v1.y - v2.y
+    dz = v1.z - v2.z
+    dist_sq = dx*dx + dy*dy + dz*dz
+    min_dist = v1.radius_x + v2.radius_x
+    return dist_sq < (min_dist * min_dist)
 
+
+def is_valid_position(new_volume: EllipsoidVolume, placed_volumes: List[EllipsoidVolume]) -> bool:
+    """Check if new volume does not collide with any existing one"""
+    for vol in placed_volumes:
+        if volumes_collide(new_volume, vol):
+            return False
+    return True
 
 
 def place_ellipsoid_volumes(fuse_id: str,
                             bounds: FuselageBounds,
-                            num_volumes: int = 10) -> List[EllipsoidVolume]:
+                            num_volumes: int = 10,
+                            max_attempts: int = 200) -> List[EllipsoidVolume]:
     """
-    Place multiple ellipsoid volumes inside the fuselage
-
-    Args:
-        fuse_id: Fuselage geometry ID
-        bounds: FuselageBounds object
-        num_volumes: Number of volumes to place
-
-    Returns:
-        List of placed EllipsoidVolume objects
+    Place multiple ellipsoid volumes inside the fuselage avoiding collisions
     """
     volumes = []
 
@@ -256,63 +234,71 @@ def place_ellipsoid_volumes(fuse_id: str,
         size_factor = random.uniform(Config.ELLIPSOID_SIZE_MIN,
                                      Config.ELLIPSOID_SIZE_MAX)
 
-        # Calculate actual size based on fuselage dimensions
         base_size = min(bounds.radius_y, bounds.radius_z)
         ellipsoid_radius = base_size * size_factor
 
-        # Generate position
-        position = generate_ellipsoid_position(
-            bounds,
-            ellipsoid_radius,
-            Config.SAFETY_MARGIN
-        )
+        # Try multiple attempts until no collision
+        placed = False
+        for attempt in range(max_attempts):
+            position = generate_ellipsoid_position(
+                bounds,
+                ellipsoid_radius,
+                Config.SAFETY_MARGIN
+            )
 
-        if position is None:
-            print(f"  ⚠️ Could not place volume {i + 1}, using fallback position")
-            # Fallback to center position
-            x = bounds.x_min + bounds.length * 0.5
-            y, z = 0.0, 0.0
-        else:
+            if position is None:
+                continue  # retry with new random position
+
             x, y, z = position
 
-        # Create ellipsoid in OpenVSP
-        ellipsoid_id = vsp.AddGeom("ELLIPSOID", "")
+            new_vol = EllipsoidVolume(
+                id=i + 1,
+                x=x,
+                y=y,
+                z=z,
+                radius_x=ellipsoid_radius,
+                radius_y=ellipsoid_radius,
+                radius_z=ellipsoid_radius
+            )
 
-        # Set to absolute coordinates
-        vsp.SetParmValUpdate(ellipsoid_id, "Abs_Or_Relitive_flag", "XForm", 0)
-        vsp.SetParmValUpdate(ellipsoid_id, "Trans_Attach_Flag", "Attach", 0)
+            if is_valid_position(new_vol, volumes):
+                # valid position, no collision
+                volumes.append(new_vol)
 
-        # Set position
-        vsp.SetParmValUpdate(ellipsoid_id, "X_Location", "XForm", x)
-        vsp.SetParmValUpdate(ellipsoid_id, "Y_Location", "XForm", y)
-        vsp.SetParmValUpdate(ellipsoid_id, "Z_Location", "XForm", z)
+                # Create ellipsoid in OpenVSP
+                ellipsoid_id = vsp.AddGeom("ELLIPSOID", "")
+                vsp.SetParmValUpdate(ellipsoid_id, "Abs_Or_Relitive_flag", "XForm", 0)
+                vsp.SetParmValUpdate(ellipsoid_id, "Trans_Attach_Flag", "Attach", 0)
+                vsp.SetParmValUpdate(ellipsoid_id, "X_Location", "XForm", x)
+                vsp.SetParmValUpdate(ellipsoid_id, "Y_Location", "XForm", y)
+                vsp.SetParmValUpdate(ellipsoid_id, "Z_Location", "XForm", z)
 
-        # Set size (uniform scaling for simplicity)
-        # Note: Actual parameter names may vary
-        try:
-            vsp.SetParmValUpdate(ellipsoid_id, "A_Radius", "Design", ellipsoid_radius)
-            vsp.SetParmValUpdate(ellipsoid_id, "B_Radius", "Design", ellipsoid_radius)
-            vsp.SetParmValUpdate(ellipsoid_id, "C_Radius", "Design", ellipsoid_radius)
-        except:
-            pass
+                try:
+                    vsp.SetParmValUpdate(ellipsoid_id, "A_Radius", "Design", ellipsoid_radius)
+                    vsp.SetParmValUpdate(ellipsoid_id, "B_Radius", "Design", ellipsoid_radius)
+                    vsp.SetParmValUpdate(ellipsoid_id, "C_Radius", "Design", ellipsoid_radius)
+                except:
+                    pass
 
-        vsp.Update()
+                vsp.Update()
 
-        # Store volume data
-        volume = EllipsoidVolume(
-            id=i + 1,
-            x=x,
-            y=y,
-            z=z,
-            radius_x=ellipsoid_radius,
-            radius_y=ellipsoid_radius,
-            radius_z=ellipsoid_radius
-        )
-        volumes.append(volume)
+                print(f"   Volume {i+1} placed after {attempt+1} attempts → "
+                      f"({x:.2f}, {y:.2f}, {z:.2f}) | Size: {ellipsoid_radius:.3f}")
+                placed = True
+                break
 
-        print(f"  ✅ Volume {i + 1} → ({x:.2f}, {y:.2f}, {z:.2f}) | Size: {ellipsoid_radius:.3f}")
+        if not placed:
+            print(f"  X Could not place volume {i+1} after {max_attempts} attempts")
+            # fallback: put at center
+            volumes.append(EllipsoidVolume(
+                i+1,
+                bounds.x_min + bounds.length/2,
+                0, 0,
+                ellipsoid_radius, ellipsoid_radius, ellipsoid_radius
+            ))
 
     return volumes
+
 
 
 def save_configuration(conf_num: int,
@@ -333,7 +319,7 @@ def save_configuration(conf_num: int,
     # Save VSP3 file
     vsp_file = os.path.join(conf_dir, f"fuse_conf{conf_num}.vsp3")
     vsp.WriteVSPFile(vsp_file, vsp.SET_ALL)
-    print(f"💾 Saved VSP3: {vsp_file}")
+    print(f" Saved VSP3: {vsp_file}")
 
     # Save CSV file
     csv_file = os.path.join(conf_dir, "volumes_positions.csv")
@@ -342,7 +328,7 @@ def save_configuration(conf_num: int,
         writer.writerow(["Volume_ID", "X", "Y", "Z", "Radius_X", "Radius_Y", "Radius_Z"])
         for vol in volumes:
             writer.writerow(vol.to_list())
-    print(f"💾 Saved CSV: {csv_file}")
+    print(f" Saved CSV: {csv_file}")
 
     # Save JSON file for additional metadata
     json_file = os.path.join(conf_dir, "volumes_data.json")
@@ -353,7 +339,7 @@ def save_configuration(conf_num: int,
     }
     with open(json_file, "w") as f:
         json.dump(config_data, f, indent=2)
-    print(f"💾 Saved JSON: {json_file}")
+    print(f" Saved JSON: {json_file}")
 
 
 # ====================
@@ -388,7 +374,7 @@ def main():
                 break
 
         if fuse_id is None:
-            raise RuntimeError("❌ No fuselage found in model!")
+            raise RuntimeError("X No fuselage found in model!")
 
         print(f"  Found fuselage: {vsp.GetGeomName(fuse_id)}")
 
@@ -403,7 +389,7 @@ def main():
         save_configuration(conf, volumes, Config.OUTPUT_DIR)
 
     print("\n" + "=" * 60)
-    print(f"✅ TASK COMPLETED!")
+    print(f" TASK COMPLETED!")
     print(f"   → {Config.NUM_CONFIGS} configurations generated")
     print(f"   → Output directory: {Config.OUTPUT_DIR}/")
     print(f"   → Each config contains: VSP3 file + CSV positions + JSON metadata")
