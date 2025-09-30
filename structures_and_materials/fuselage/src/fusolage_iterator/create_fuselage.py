@@ -74,6 +74,16 @@ def check_collisions(volume_positions: List[Tuple[float, float, float]],
                 print(f"[Warning] Volumes {i} and {j} too close (d={dist:.3f})")
                 valid = False
 
+    # Separation constraints for must-be-apart pairs
+    if must_be_apart:
+        for i, j in must_be_apart:
+            x1, y1, z1 = volume_positions[i]
+            x2, y2, z2 = volume_positions[j]
+            dist = math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2)
+            if dist < apart_dist:
+                print(f"[Constraint] Volumes {i} and {j} must be apart by {apart_dist}, but d={dist:.3f}")
+                valid = False
+
     return valid
 
 
@@ -113,8 +123,17 @@ def create_fuselage(length, width, height, filename="fuselage.vsp3"):
     # Optimize fuselage around placed volumes 
     length, width, height = optimize_fuselage(fid, positions, margin=0.2)
 
-    # Check collisions after optimization
-    valid = check_collisions(positions, length=length, width=width, height=height, min_dist=0.1)
+    # Example: volumes 0 and 1, 2 and 3 must be apart by at least 0.5 units
+    must_be_apart = [(0, 1), (2, 3)]
+    valid = check_collisions(
+        positions,
+        length=length,
+        width=width,
+        height=height,
+        min_dist=0.1,
+        must_be_apart=must_be_apart,
+        apart_dist=0.5
+    )
 
     vsp.WriteVSPFile(filename, vsp.SET_ALL)
     print(f"Fuselage saved to {filename}")
