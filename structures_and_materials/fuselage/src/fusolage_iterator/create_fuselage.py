@@ -142,16 +142,39 @@ def create_fuselage(length, width, height, filename="fuselage.vsp3"):
     else:
         print("Some volumes invalid after optimization.")
 
+def batch_generate_fuselages(
+    length_range: Tuple[float, float],
+    width_range: Tuple[float, float],
+    height_range: Tuple[float, float],
+    num_samples: int = 10,
+    output_prefix: str = "fuselage"
+):
+    """
+    Generate multiple fuselages by sampling parameters within given ranges.
+    """
+    for i in range(num_samples):
+        length = random.uniform(*length_range)
+        width = random.uniform(*width_range)
+        height = random.uniform(*height_range)
+        filename = f"{output_prefix}_{i+1}.vsp3"
+        print(f"\nGenerating fuselage {i+1}: Length={length:.2f}, Width={width:.2f}, Height={height:.2f}")
+        create_fuselage(length, width, height, filename)
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) < 4:
+    if len(sys.argv) == 2 and sys.argv[1] == "--batch":
+        # Example ranges, adjust as needed
+        length_range = (10.0, 15.0)
+        width_range = (2.0, 4.0)
+        height_range = (2.0, 4.0)
+        batch_generate_fuselages(length_range, width_range, height_range, num_samples=10)
+    elif len(sys.argv) < 4:
         print("Usage: python create_fuselage.py <length> <width> <height> [output_file]")
+        print("   or: python create_fuselage.py --batch")
         sys.exit(1)
-
-    length = float(sys.argv[1])
-    width = float(sys.argv[2])
-    height = float(sys.argv[3])
-    filename = sys.argv[4] if len(sys.argv) > 4 else "fuselage.vsp3"
-
-    create_fuselage(length, width, height, filename)
+    else:
+        length = float(sys.argv[1])
+        width = float(sys.argv[2])
+        height = float(sys.argv[3])
+        filename = sys.argv[4] if len(sys.argv) > 4 else "fuselage.vsp3"
+        create_fuselage(length, width, height, filename)
