@@ -34,6 +34,7 @@ def place_volumes(fid, n=10, length=10, width=2, height=2):
 def check_collisions(volume_positions, min_dist=0.1, length=10, width=2, height=2):
     """
     Check for pairwise collisions between volumes and for overlap with fuselage boundary.
+    Enforces minimum distance constraint between all volume centers.
 
     Args:
         volume_positions (list of (x, y, z)): Volume positions
@@ -45,14 +46,14 @@ def check_collisions(volume_positions, min_dist=0.1, length=10, width=2, height=
     """
     n = len(volume_positions)
     valid = True
-    # Check volume-to-volume collisions
+    # Check volume-to-volume collisions (minimum distance constraint)
     for i in range(n):
         for j in range(i + 1, n):
             x1, y1, z1 = volume_positions[i]
             x2, y2, z2 = volume_positions[j]
             dist = math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2)
             if dist < min_dist:
-                print(f"[Warning] Volumes {i} and {j} are too close (distance={dist:.3f})")
+                print(f"[Violation] Volumes {i} and {j} are too close (distance={dist:.3f} < min_dist={min_dist})")
                 valid = False
     # Check volume-to-fuselage boundary
     for idx, (x, y, z) in enumerate(volume_positions):
