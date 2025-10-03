@@ -27,7 +27,10 @@ class Config:
     # Placement parameters
     SAFETY_MARGIN = 0.8  # Keep volumes within 80% of local radius
     LONGITUDINAL_MARGIN = 0.05  # Margin from fuselage ends (5% of length)
-    XSEC_SAMPLING_DENSITY = 20  # Number of samples along fuselage length
+    
+    # Surface sampling parameters
+    U_SAMPLES = 100  # Longitudinal samples (along fuselage length)
+    W_SAMPLES = 36   # Circumferential samples (around fuselage)
 
 
 # ====================
@@ -56,66 +59,76 @@ class EllipsoidVolume:
 
 @dataclass
 class CrossSection:
-    """Represents a cross-section of the fuselage at a specific x-location"""
-    x: float
-    radius_y: float
-    radius_z: float
+    """Represents a cross-section of the fuselage at a specific u-location"""
+    u: float  # Parametric coordinate along fuselage (0-1)
+    x: float  # Physical X coordinate
+    radius_y: float  # Half-width in Y direction
+    radius_z: float  # Half-height in Z direction
     area: float
+    center_y: float  # Y coordinate of center
+    center_z: float  # Z coordinate of center
 
 
 @dataclass
 class FuselageBounds:
-    """Enhanced fuselage bounds with actual cross-sectional data"""
+    """Enhanced fuselage bounds with actual surface-sampled data"""
     length: float
     x_min: float
     x_max: float
     cross_sections: List[CrossSection]
     bbox_min: Tuple[float, float, float]
     bbox_max: Tuple[float, float, float]
+    surf_indx: int  # Main surface index
 
-    def get_radius_at_x(self, x: float) -> Tuple[float, float]:
+    def get_radius_at_u(self, u: float) -> Tuple[float, float, float, float]:
         """
-        Get effective radius at specific x position using actual cross-section data
+        Get effective radius and center at specific u position using real sampled data
         Uses linear interpolation between known cross-sections
+        
+        Returns: (radius_y, radius_z, center_y, center_z)
         """
         if not self.cross_sections:
-            return 1.0, 1.0
+            return 1.0, 1.0, 0.0, 0.0
         
-        # Clamp x to fuselage bounds
-        x = max(self.x_min, min(self.x_max, x))
+        # Clamp u to [0, 1]
+        u = max(0.0, min(1.0, u))
         
         # Find surrounding cross-sections
         for i, cs in enumerate(self.cross_sections):
-            if cs.x >= x:
+            if cs.u >= u:
                 if i == 0:
-                    return cs.radius_y, cs.radius_z
+                    return cs.radius_y, cs.radius_z, cs.center_y, cs.center_z
                 
                 # Interpolate between cs[i-1] and cs[i]
                 cs_prev = self.cross_sections[i-1]
-                t = (x - cs_prev.x) / (cs.x - cs_prev.x) if cs.x != cs_prev.x else 0
+                t = (u - cs_prev.u) / (cs.u - cs_prev.u) if cs.u != cs_prev.u else 0
                 
                 radius_y = cs_prev.radius_y + t * (cs.radius_y - cs_prev.radius_y)
                 radius_z = cs_prev.radius_z + t * (cs.radius_z - cs_prev.radius_z)
+                center_y = cs_prev.center_y + t * (cs.center_y - cs_prev.center_y)
+                center_z = cs_prev.center_z + t * (cs.center_z - cs_prev.center_z)
                 
-                return radius_y, radius_z
+                return radius_y, radius_z, center_y, center_z
         
-        # If x is beyond last cross-section
-        return self.cross_sections[-1].radius_y, self.cross_sections[-1].radius_z
+        # If u is beyond last cross-section
+        last = self.cross_sections[-1]
+        return last.radius_y, last.radius_z, last.center_y, last.center_z
 
 
-def analyze_fuselage_geometry(fuse_id: str) -> FuselageBounds:
+def analyze_fuselage_geometry_real(fuse_id: str) -> FuselageBounds:
     """
-    Analyze fuselage geometry using OpenVSP XSec functions
+    Analyze fuselage geometry using OpenVSP surface query functions
+    to get REAL geometry data from the actual surface
     
     Args:
         fuse_id: OpenVSP geometry ID of fuselage
     
     Returns:
-        FuselageBounds object with actual cross-sectional data
+        FuselageBounds object with actual surface-sampled cross-sectional data
     """
-    print("  Analyzing fuselage geometry...")
+    print("  Analyzing fuselage geometry using REAL surface data...")
     
-    # Get accurate bounding box
+    # Get bounding box for reference
     bbox_min_vec = vsp.GetGeomBBoxMin(fuse_id, 0, True)
     bbox_max_vec = vsp.GetGeomBBoxMax(fuse_id, 0, True)
     
@@ -127,105 +140,101 @@ def analyze_fuselage_geometry(fuse_id: str) -> FuselageBounds:
     print(f"    Bounding box: min{bbox_min}, max{bbox_max}")
     print(f"    Length: {length:.2f}")
     
-    # Get XSecSurfs
-    num_xsec_surfs = vsp.GetNumXSecSurfs(fuse_id)
-    print(f"    Number of XSec surfaces: {num_xsec_surfs}")
+    # Get main surface index (usually 0 for fuselage)
+    surf_indx = 0
     
     cross_sections = []
     
-    if num_xsec_surfs > 0:
-        # Get the main XSecSurf (usually index 0 for fuselage)
-        xsec_surf_id = vsp.GetXSecSurf(fuse_id, 0)
-        num_xsecs = vsp.GetNumXSec(xsec_surf_id)
-        
-        print(f"    Number of XSecs: {num_xsecs}")
-        
-        # Sample cross-sections along the fuselage
-        for i in range(Config.XSEC_SAMPLING_DENSITY):
-            # Normalize position along fuselage
-            t = i / (Config.XSEC_SAMPLING_DENSITY - 1) if Config.XSEC_SAMPLING_DENSITY > 1 else 0
-            x = bbox_min[0] + t * length
-            
-            # Get cross-section properties at this location
-            radius_y, radius_z = estimate_local_radius(fuse_id, x, bbox_min, bbox_max)
-            
-            cs = CrossSection(
-                x=x,
-                radius_y=radius_y,
-                radius_z=radius_z,
-                area=math.pi * radius_y * radius_z
-            )
-            cross_sections.append(cs)
+    print(f"    Sampling {Config.U_SAMPLES} cross-sections with {Config.W_SAMPLES} points each...")
     
-    else:
-        # Fallback: create basic cross-sections if XSec data unavailable
-        print("    Warning: No XSec data available, using fallback method")
-        for i in range(Config.XSEC_SAMPLING_DENSITY):
-            t = i / (Config.XSEC_SAMPLING_DENSITY - 1) if Config.XSEC_SAMPLING_DENSITY > 1 else 0
-            x = bbox_min[0] + t * length
+    # Sample cross-sections along the fuselage using actual surface points
+    for i in range(Config.U_SAMPLES):
+        u = i / (Config.U_SAMPLES - 1) if Config.U_SAMPLES > 1 else 0.5
+        
+        # Sample points around the circumference at this u location
+        points_y = []
+        points_z = []
+        points_x = []
+        
+        for j in range(Config.W_SAMPLES):
+            w = j / Config.W_SAMPLES  # Full circle: 0 to 1
             
-            # Simple taper estimation based on bounding box
-            width = bbox_max[1] - bbox_min[1]
-            height = bbox_max[2] - bbox_min[2]
-            
-            # Apply simple nose/tail taper
-            if t < 0.2:
-                taper = 0.2 + 0.8 * (t / 0.2)
-            elif t > 0.8:
-                taper = 0.2 + 0.8 * ((1.0 - t) / 0.2)
-            else:
-                taper = 1.0
-            
-            cs = CrossSection(
-                x=x,
-                radius_y=(width / 2) * taper,
-                radius_z=(height / 2) * taper,
-                area=math.pi * (width / 2) * (height / 2) * taper * taper
-            )
-            cross_sections.append(cs)
+            # Get actual 3D point on surface using OpenVSP
+            try:
+                point = vsp.CompPnt01(fuse_id, surf_indx, u, w)
+                points_x.append(point.x())
+                points_y.append(point.y())
+                points_z.append(point.z())
+            except:
+                # Fallback if CompPnt01 fails
+                print(f"      Warning: CompPnt01 failed at u={u:.3f}, w={w:.3f}")
+                continue
+        
+        if len(points_y) < 4:
+            print(f"      Warning: Insufficient points at u={u:.3f}, skipping")
+            continue
+        
+        # Calculate center of this cross-section
+        center_y = sum(points_y) / len(points_y)
+        center_z = sum(points_z) / len(points_z)
+        avg_x = sum(points_x) / len(points_x)
+        
+        # Calculate radii (distance from center to surface)
+        radii_y = [abs(y - center_y) for y in points_y]
+        radii_z = [abs(z - center_z) for z in points_z]
+        
+        # Use average of maximum extents for radius
+        radius_y = max(radii_y) if radii_y else 0.5
+        radius_z = max(radii_z) if radii_z else 0.5
+        
+        # Calculate approximate area
+        area = math.pi * radius_y * radius_z
+        
+        cs = CrossSection(
+            u=u,
+            x=avg_x,
+            radius_y=radius_y,
+            radius_z=radius_z,
+            area=area,
+            center_y=center_y,
+            center_z=center_z
+        )
+        cross_sections.append(cs)
+        
+        if i % 20 == 0:  # Progress indicator
+            print(f"      u={u:.3f}: X={avg_x:.2f}, center=({center_y:.3f}, {center_z:.3f}), "
+                  f"radii=({radius_y:.3f}, {radius_z:.3f})")
+    
+    if not cross_sections:
+        raise RuntimeError("Failed to sample any valid cross-sections from fuselage surface!")
+    
+    print(f"    ✓ Successfully sampled {len(cross_sections)} real cross-sections from surface")
+    
+    # Get actual X range from sampled data
+    x_min_real = min(cs.x for cs in cross_sections)
+    x_max_real = max(cs.x for cs in cross_sections)
     
     return FuselageBounds(
-        length=length,
-        x_min=bbox_min[0],
-        x_max=bbox_max[0],
+        length=x_max_real - x_min_real,
+        x_min=x_min_real,
+        x_max=x_max_real,
         cross_sections=cross_sections,
         bbox_min=bbox_min,
-        bbox_max=bbox_max
+        bbox_max=bbox_max,
+        surf_indx=surf_indx
     )
 
 
-def estimate_local_radius(fuse_id: str, x: float, bbox_min: tuple, bbox_max: tuple) -> Tuple[float, float]:
-    """
-    Estimate local radius at given x position
-    This is a simplified approach - in practice, you might want to use
-    more sophisticated methods like surface tessellation analysis
-    """
-    # Get fuselage parameters if available
-    try:
-        # Try to get fuselage-specific parameters
-        length = bbox_max[0] - bbox_min[0]
-        width = bbox_max[1] - bbox_min[1]
-        height = bbox_max[2] - bbox_min[2]
-        
-        # Normalize x position
-        t = (x - bbox_min[0]) / length if length > 0 else 0
-        
-        # Apply realistic fuselage taper
-        if t < 0.15:  # Nose section
-            taper = 0.1 + 0.9 * (t / 0.15)
-        elif t > 0.85:  # Tail section
-            taper = 0.1 + 0.9 * ((1.0 - t) / 0.15)
-        else:  # Main body
-            taper = 1.0
-        
-        radius_y = (width / 2) * taper
-        radius_z = (height / 2) * taper
-        
-        return radius_y, radius_z
-    
-    except:
-        # Fallback values
-        return 1.0, 1.0
+def x_to_u(x: float, bounds: FuselageBounds) -> float:
+    """Convert X coordinate to u parameter (0-1)"""
+    if bounds.length == 0:
+        return 0.5
+    return (x - bounds.x_min) / bounds.length
+
+
+def u_to_x(u: float, bounds: FuselageBounds) -> float:
+    """Convert u parameter (0-1) to X coordinate"""
+    return bounds.x_min + u * bounds.length
 
 
 def is_ellipsoid_inside_fuselage(volume: EllipsoidVolume,
@@ -234,7 +243,7 @@ def is_ellipsoid_inside_fuselage(volume: EllipsoidVolume,
                                  debug: bool = False) -> bool:
     """
     Check if an ellipsoid is fully contained within the fuselage
-    using actual cross-sectional data
+    using REAL cross-sectional data from surface sampling
     """
     # Check longitudinal bounds
     if (volume.x - volume.radius_x < bounds.x_min or
@@ -245,33 +254,38 @@ def is_ellipsoid_inside_fuselage(volume: EllipsoidVolume,
             print(f"           Fuselage X range: [{bounds.x_min:.2f}, {bounds.x_max:.2f}]")
         return False
 
-    # Get effective radius at this x position
-    eff_radius_y, eff_radius_z = bounds.get_radius_at_x(volume.x)
+    # Convert X position to u parameter
+    u = x_to_u(volume.x, bounds)
+    
+    # Get REAL effective radius at this u position from actual surface data
+    eff_radius_y, eff_radius_z, center_y, center_z = bounds.get_radius_at_u(u)
 
     # Apply safety factor
     safe_radius_y = eff_radius_y * safety_factor
     safe_radius_z = eff_radius_z * safety_factor
 
-    # Check Y direction
-    y_overflow = abs(volume.y) + volume.radius_y > safe_radius_y
-    z_overflow = abs(volume.z) + volume.radius_z > safe_radius_z
+    # Check if ellipsoid fits within cross-section (relative to actual center)
+    y_extent = abs(volume.y - center_y) + volume.radius_y
+    z_extent = abs(volume.z - center_z) + volume.radius_z
+    
+    y_overflow = y_extent > safe_radius_y
+    z_overflow = z_extent > safe_radius_z
 
     if debug and (y_overflow or z_overflow):
-        print(f"    DEBUG: Volume {volume.id} CROSS-SECTION OVERFLOW at X={volume.x:.2f}!")
-        print(f"           Effective radii: Y={eff_radius_y:.2f}, Z={eff_radius_z:.2f}")
+        print(f"    DEBUG: Volume {volume.id} CROSS-SECTION OVERFLOW at X={volume.x:.2f} (u={u:.3f})!")
+        print(f"           REAL surface radii: Y={eff_radius_y:.2f}, Z={eff_radius_z:.2f}")
+        print(f"           REAL center: Y={center_y:.3f}, Z={center_z:.3f}")
         print(f"           Safe radii (with {safety_factor:.1f} factor): Y={safe_radius_y:.2f}, Z={safe_radius_z:.2f}")
-        print(f"           Volume Y extent: center={volume.y:.2f}, radius={volume.radius_y:.2f}, total={abs(volume.y) + volume.radius_y:.2f}")
-        print(f"           Volume Z extent: center={volume.z:.2f}, radius={volume.radius_z:.2f}, total={abs(volume.z) + volume.radius_z:.2f}")
+        print(f"           Volume position: Y={volume.y:.2f}, Z={volume.z:.2f}")
+        print(f"           Volume radii: Y={volume.radius_y:.2f}, Z={volume.radius_z:.2f}")
+        print(f"           Y extent from center: {y_extent:.2f} vs safe={safe_radius_y:.2f}")
+        print(f"           Z extent from center: {z_extent:.2f} vs safe={safe_radius_z:.2f}")
         if y_overflow:
-            print(f"           Y OVERFLOW: {abs(volume.y) + volume.radius_y:.2f} > {safe_radius_y:.2f}")
+            print(f"           Y OVERFLOW: {y_extent:.2f} > {safe_radius_y:.2f}")
         if z_overflow:
-            print(f"           Z OVERFLOW: {abs(volume.z) + volume.radius_z:.2f} > {safe_radius_z:.2f}")
+            print(f"           Z OVERFLOW: {z_extent:.2f} > {safe_radius_z:.2f}")
 
-    # Check if ellipsoid fits within cross-section
-    if y_overflow or z_overflow:
-        return False
-
-    return True
+    return not (y_overflow or z_overflow)
 
 
 def generate_ellipsoid_position(bounds: FuselageBounds,
@@ -280,32 +294,31 @@ def generate_ellipsoid_position(bounds: FuselageBounds,
                                 max_attempts: int = 100) -> Optional[Tuple[float, float, float]]:
     """
     Generate a valid position for an ellipsoid inside the fuselage
-    using actual cross-sectional data
+    using REAL cross-sectional data from surface sampling
     """
     for _ in range(max_attempts):
-        # Longitudinal position with margin
-        margin_x = Config.LONGITUDINAL_MARGIN * bounds.length
-        x_min_safe = bounds.x_min + margin_x
-        x_max_safe = bounds.x_max - margin_x
+        # Random u position with margin
+        margin_u = Config.LONGITUDINAL_MARGIN
+        u = random.uniform(margin_u, 1.0 - margin_u)
         
-        # Random x position
-        x = random.uniform(x_min_safe, x_max_safe)
+        # Convert to X coordinate
+        x = u_to_x(u, bounds)
         
-        # Get effective radius at this x
-        eff_radius_y, eff_radius_z = bounds.get_radius_at_x(x)
+        # Get REAL effective radius at this u from actual surface data
+        eff_radius_y, eff_radius_z, center_y, center_z = bounds.get_radius_at_u(u)
         
-        # Apply safety margin
+        # Apply safety margin and account for volume size
         safe_radius_y = eff_radius_y * safety_margin - volume_size
         safe_radius_z = eff_radius_z * safety_margin - volume_size
         
         if safe_radius_y > 0 and safe_radius_z > 0:
             # Generate random position within elliptical cross-section
+            # relative to the REAL center of this cross-section
             angle = random.uniform(0, 2 * math.pi)
-            # Use sqrt for uniform distribution in ellipse
-            r = math.sqrt(random.uniform(0, 1))
+            r = math.sqrt(random.uniform(0, 1))  # Uniform distribution in ellipse
             
-            y = r * safe_radius_y * math.cos(angle)
-            z = r * safe_radius_z * math.sin(angle)
+            y = center_y + r * safe_radius_y * math.cos(angle)
+            z = center_z + r * safe_radius_z * math.sin(angle)
             
             return x, y, z
     
@@ -334,7 +347,7 @@ def is_valid_position(new_volume: EllipsoidVolume,
                       bounds: FuselageBounds,
                       debug: bool = False) -> bool:
     """Check if new volume is valid (inside fuselage and no collisions)"""
-    # Check if inside fuselage
+    # Check if inside fuselage using REAL surface data
     if not is_ellipsoid_inside_fuselage(new_volume, bounds, Config.SAFETY_MARGIN, debug):
         return False
     
@@ -347,7 +360,7 @@ def is_valid_position(new_volume: EllipsoidVolume,
                 dy = new_volume.y - vol.y
                 dz = new_volume.z - vol.z
                 distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-                min_required = ((new_volume.radius_x + vol.radius_x) * 1.1)  # 1.1 is the margin from volumes_collide
+                min_required = ((new_volume.radius_x + vol.radius_x) * 1.1)
                 print(f"           Distance: {distance:.2f}, Required: {min_required:.2f}")
             return False
     
@@ -359,27 +372,26 @@ def place_ellipsoid_volumes(fuse_id: str,
                             num_volumes: int = 10,
                             max_attempts: int = 500) -> List[EllipsoidVolume]:
     """
-    Place multiple ellipsoid volumes inside the fuselage using actual geometry
+    Place multiple ellipsoid volumes inside the fuselage using REAL geometry
     """
     volumes = []
     
-    print(f"  Placing {num_volumes} volumes...")
+    print(f"  Placing {num_volumes} volumes using REAL surface geometry...")
     
     for i in range(num_volumes):
-        # Variable size based on local fuselage dimensions
         placed = False
         
         for attempt in range(max_attempts):
-            # Random longitudinal position to determine local size constraints
-            x_test = random.uniform(bounds.x_min, bounds.x_max)
-            local_radius_y, local_radius_z = bounds.get_radius_at_x(x_test)
+            # Random u position to determine local size constraints
+            u_test = random.uniform(0, 1)
+            local_radius_y, local_radius_z, _, _ = bounds.get_radius_at_u(u_test)
             max_local_radius = min(local_radius_y, local_radius_z)
             
-            # Size based on local constraints
+            # Size based on REAL local constraints
             size_factor = random.uniform(Config.ELLIPSOID_SIZE_MIN, Config.ELLIPSOID_SIZE_MAX)
             ellipsoid_radius = max_local_radius * size_factor
             
-            # Generate position
+            # Generate position using REAL surface data
             position = generate_ellipsoid_position(
                 bounds,
                 ellipsoid_radius,
@@ -401,7 +413,8 @@ def place_ellipsoid_volumes(fuse_id: str,
                 radius_z=ellipsoid_radius
             )
             
-            if is_valid_position(new_vol, volumes, bounds, debug=True):
+            # Validate position against REAL surface geometry
+            if is_valid_position(new_vol, volumes, bounds, debug=False):
                 volumes.append(new_vol)
                 
                 # Create ellipsoid in OpenVSP
@@ -421,16 +434,16 @@ def place_ellipsoid_volumes(fuse_id: str,
                 
                 vsp.Update()
                 
+                u = x_to_u(x, bounds)
                 print(f"    Volume {i+1} placed after {attempt+1} attempts → "
-                      f"({x:.2f}, {y:.2f}, {z:.2f}) | Size: {ellipsoid_radius:.3f}")
+                      f"X={x:.2f} (u={u:.3f}), Y={y:.2f}, Z={z:.2f} | R={ellipsoid_radius:.3f}")
                 
-                # Verify placement with detailed check
+                # Verify placement with REAL surface check
                 if not is_ellipsoid_inside_fuselage(new_vol, bounds, Config.SAFETY_MARGIN, debug=False):
-                    print(f"    WARNING: Volume {i+1} verification failed - may be outside fuselage!")
-                    # Perform detailed debug check
+                    print(f"    WARNING: Volume {i+1} verification failed!")
                     is_ellipsoid_inside_fuselage(new_vol, bounds, Config.SAFETY_MARGIN, debug=True)
                 else:
-                    print(f"    ✓ Volume {i+1} verified as correctly placed inside fuselage")
+                    print(f"    ✓ Volume {i+1} verified using REAL surface geometry")
                 
                 placed = True
                 break
@@ -448,7 +461,6 @@ def save_configuration(conf_num: int,
     """
     Save configuration files with enhanced metadata
     """
-    # Create configuration directory
     conf_dir = os.path.join(output_dir, f"conf{conf_num}")
     os.makedirs(conf_dir, exist_ok=True)
     
@@ -466,23 +478,32 @@ def save_configuration(conf_num: int,
             writer.writerow(vol.to_list())
     print(f"  Saved CSV: {csv_file}")
     
-    # Save enhanced JSON file
+    # Save enhanced JSON file with REAL surface data
     json_file = os.path.join(conf_dir, "volumes_data.json")
     config_data = {
         "configuration": conf_num,
         "num_volumes": len(volumes),
+        "sampling_method": "REAL_SURFACE_GEOMETRY",
+        "sampling_params": {
+            "u_samples": Config.U_SAMPLES,
+            "w_samples": Config.W_SAMPLES
+        },
         "fuselage_bounds": {
             "length": bounds.length,
             "x_min": bounds.x_min,
             "x_max": bounds.x_max,
             "bbox_min": bounds.bbox_min,
             "bbox_max": bounds.bbox_max,
-            "num_cross_sections": len(bounds.cross_sections)
+            "num_cross_sections": len(bounds.cross_sections),
+            "surface_index": bounds.surf_indx
         },
         "volumes": [vol.to_dict() for vol in volumes],
-        "cross_sections": [
+        "cross_sections_real": [
             {
+                "u": cs.u,
                 "x": cs.x,
+                "center_y": cs.center_y,
+                "center_z": cs.center_z,
                 "radius_y": cs.radius_y,
                 "radius_z": cs.radius_z,
                 "area": cs.area
@@ -491,7 +512,7 @@ def save_configuration(conf_num: int,
     }
     with open(json_file, "w") as f:
         json.dump(config_data, f, indent=2)
-    print(f"  Saved JSON: {json_file}")
+    print(f"  Saved JSON with REAL surface data: {json_file}")
 
 
 # ====================
@@ -500,9 +521,11 @@ def save_configuration(conf_num: int,
 def main():
     """Main execution function"""
     
-    print("=" * 60)
-    print("Enhanced OpenVSP Volume Placement System")
-    print("=" * 60)
+    print("=" * 70)
+    print("OpenVSP Volume Placement System - REAL SURFACE GEOMETRY")
+    print("=" * 70)
+    print("Using vsp.CompPnt01() to sample actual surface points")
+    print("=" * 70)
     
     # Create output directory
     os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
@@ -530,25 +553,26 @@ def main():
         
         print(f"  Found fuselage: {vsp.GetGeomName(fuse_id)}")
         
-        # Analyze fuselage geometry using OpenVSP functions
-        bounds = analyze_fuselage_geometry(fuse_id)
+        # Analyze fuselage geometry using REAL surface sampling
+        bounds = analyze_fuselage_geometry_real(fuse_id)
         
-        print(f"  Analyzed fuselage: L={bounds.length:.1f}m")
-        print(f"  Cross-sections sampled: {len(bounds.cross_sections)}")
+        print(f"  ✓ Analyzed fuselage: L={bounds.length:.1f}m")
+        print(f"  ✓ Real cross-sections sampled: {len(bounds.cross_sections)}")
         
-        # Place volumes
+        # Place volumes using REAL surface data
         volumes = place_ellipsoid_volumes(fuse_id, bounds, Config.NUM_VOLUMES)
         
         # Save configuration
         save_configuration(conf, volumes, bounds, Config.OUTPUT_DIR)
     
-    print("\n" + "=" * 60)
-    print(f" ENHANCED TASK COMPLETED!")
+    print("\n" + "=" * 70)
+    print(" ✓ TASK COMPLETED - USING REAL SURFACE GEOMETRY!")
     print(f"   → {Config.NUM_CONFIGS} configurations generated")
-    print(f"   → Using actual fuselage geometry analysis")
+    print(f"   → Using vsp.CompPnt01() for actual surface points")
+    print(f"   → {Config.U_SAMPLES} longitudinal × {Config.W_SAMPLES} circumferential samples")
     print(f"   → Output directory: {Config.OUTPUT_DIR}/")
-    print(f"   → Each config contains: VSP3 + CSV + Enhanced JSON metadata")
-    print("=" * 60)
+    print(f"   → Each config contains: VSP3 + CSV + JSON with REAL surface data")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

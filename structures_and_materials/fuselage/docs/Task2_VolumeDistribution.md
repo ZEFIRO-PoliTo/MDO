@@ -4,7 +4,7 @@
 2. **Description**
    - This Python script places 10 volumes (ellipsoids) inside a predefined fuselage geometry created in OpenVSP.  
    - The placement ensures that volumes are fully contained within the fuselage and avoids collisions.
-   - Compared to old version, this implementation performs a detailed geometric analysis of the fuselage (bounding box and cross-sections) instead of relying on a simplified tapering function.
+   - Compared to the previous version, this implementation performs a real geometric analysis of the fuselage using vsp.CompPnt01() to sample surface points, instead of relying on a simplified taper function.
 
 3. **Inputs**
    - Predefined fuselage in OpenVSP format (`input_fuse.vsp3`)
@@ -21,11 +21,16 @@
 
     If input fuselage available: **Run (`Volumes.py`) -> output: (`configs/`)**
 
+    **U_SAMPLES** Longitudinal samples, higher value -> more precise -> slower
+    **W_SAMPLES** Circumferential samples, higher value -> more precise -> slower
+
    1. Generate a new fuselage using (`Fuselage.py`) or load an existent fuselage VSP3 file
-   2. Extract fuselage bounds: compute fuselage bounding box, sample cross-sections along the longitudinal axis (X), and interpolate local radii (radius_y, radius_z) for placement.
+   2. Extract fuselage bounds: 
+      - The fuselage is divided into U_SAMPLES longitudinal sections, and for each section, W_SAMPLES points are sampled around the circumference using vsp.CompPnt01().
+      - These points are used to compute the center and maximum radii of each cross-section, capturing the real fuselage shape for volume placement
    3. For each of the 10 volumes : 
          - Randomly determine ellipsoid size within specified min/max limits.
-         - Generate a valid position inside the fuselage considering taper ( the gradual reduction of the shape) and safety margins.
+         - Generate a valid position inside the fuselage considering considering the local fuselage shape and safety margins.
          - Check collisions with already placed volumes.
          - Place the volume in OpenVSP. 
    4. Repeat the above for the number of configurations specified (default 10).
@@ -51,11 +56,19 @@
         - `volumes_positions.csv`
         - `volumes_data.json`
 
+   **Example visualizations:**
+
+   ![Volume placement example 1](Images/example_1.png)  
+   *Figure 1: Example of 10 ellipsoids placed inside the fuselage for configuration 1.*
+
+   ![Volume placement example 2](Images/example_2.png)  
+   *Figure 2: Another configuration showing volume placement inside the fuselage.*
+
 7. **Limitations / Notes**
    - Only ellipsoids are currently supported: ellipsoids are used because their 3D position and size can be easily calculated for placement and collision checks. Other shapes, such as pods or wings, do not have simple Python methods to determine their dimensions, so collision checking would be unreliable
    - Placement uses approximate collision checking (ellipsoids are considered ideal spheres)
    - Placement may require many attempts in dense configurations (computationally more expensive than the old version).
-   - Not entirely accurate for highly irregular fuselage shapes: in such cases, the bounding-box and interpolation method may fail, and it is recommended to use real bounds directly from fuselage sections (more complex but more precise).
+   - In highly irregular fuselages, cross-section interpolation may not be fully accurate; direct per-section checks using meshes may improve precision.
 
 ---
 
