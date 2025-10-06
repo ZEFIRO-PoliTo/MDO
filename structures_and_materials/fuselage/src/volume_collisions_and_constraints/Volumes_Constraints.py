@@ -20,7 +20,7 @@ class Config:
 
     # Placement parameters
     SAFETY_MARGIN = 0.8  # Keep volumes within 80% of local radius
-    LONGITUDINAL_MARGIN = 0.05  # Margin from fuselage ends (5% of length)
+    LONGITUDINAL_MARGIN = 0.03  # Margin from fuselage ends (5% of length)
 
     # Surface sampling parameters
     U_SAMPLES = 100  # Longitudinal samples (along fuselage length)
@@ -31,10 +31,10 @@ class Config:
 # Data Classes
 # ====================
 @dataclass
-class EllipsoidVolume:
+class BoxVolume:
     """
-    Represents a single ellipsoid volume with its properties.
-    Now supports defining dimensions (length,width,height) and auto-calculates radii.
+    Represents a single box volume with its properties.
+    Now supports defining dimensions (length,width,height).
     distance_constraints: List of tuples (target_volume_id, min_distance_meters)
     """
     id: int
@@ -46,16 +46,16 @@ class EllipsoidVolume:
     height: float  # full height (Z axis) in meters
     distance_constraints: List[Tuple[int, float]] = field(default_factory=list)
 
-    # radii will be derived from dimensions
-    radius_x: float = 0.0
-    radius_y: float = 0.0
-    radius_z: float = 0.0
+    # half-dimensions will be derived from dimensions
+    half_length: float = 0.0
+    half_width: float = 0.0
+    half_height: float = 0.0
 
     def __post_init__(self):
-        # Derive radii from dimensions if not provided
-        self.radius_x = self.length / 2.0
-        self.radius_y = self.width / 2.0
-        self.radius_z = self.height / 2.0
+        # Derive half-dimensions from dimensions
+        self.half_length = self.length / 2.0
+        self.half_width = self.width / 2.0
+        self.half_height = self.height / 2.0
 
     def to_list(self):
         """Convert to list for CSV export (dimensions + center position)"""
@@ -255,49 +255,77 @@ def u_to_x(u: float, bounds: FuselageBounds) -> float:
 # ====================
 # Controlli e collisioni
 # ====================
-def is_ellipsoid_inside_fuselage(volume: EllipsoidVolume,
-                                 bounds: FuselageBounds,
-                                 safety_factor: float = Config.SAFETY_MARGIN,
-                                 debug: bool = False) -> bool:
+def is_box_inside_fuselage(volume: BoxVolume,
+                           bounds: FuselageBounds,
+                           safety_factor: float = Config.SAFETY_MARGIN,
+                           debug: bool = False) -> bool:
     """
-    Check if an ellipsoid is fully contained within the fuselage
+    Check if a box is fully contained within the fuselage
     using REAL cross-sectional data from surface sampling
     """
-    # Check longitudinal bounds (use envelope along X with half-length radius_x)
-    if (volume.x - volume.radius_x < bounds.x_min or
-            volume.x + volume.radius_x > bounds.x_max):
+    # Calcola half-dimensions al volo
+    half_length = volume.length / 2.0
+    half_width = volume.width / 2.0
+    half_height = volume.height / 2.0
+
+    # Check longitudinal bounds (use envelope along X with half-length)
+    # AGGIUNTO: Controllo più rigoroso per i limiti longitudinali
+    if (volume.x - half_length < bounds.x_min + bounds.length * Config.LONGITUDINAL_MARGIN or
+            volume.x + half_length > bounds.x_max - bounds.length * Config.LONGITUDINAL_MARGIN):
         if debug:
             print(f"    DEBUG: Volume {volume.id} LONGITUDINAL OVERFLOW!")
-            print(f"           Volume X range: [{volume.x - volume.radius_x:.2f}, {volume.x + volume.radius_x:.2f}]")
-            print(f"           Fuselage X range: [{bounds.x_min:.2f}, {bounds.x_max:.2f}]")
+            print(f"           Volume X range: [{volume.x - half_length:.2f}, {volume.x + half_length:.2f}]")
+            print(
+                f"           Fuselage X range (with margins): [{bounds.x_min + bounds.length * Config.LONGITUDINAL_MARGIN:.2f}, {bounds.x_max - bounds.length * Config.LONGITUDINAL_MARGIN:.2f}]")
         return False
 
-    # Convert X position to u parameter
-    u = x_to_u(volume.x, bounds)
+    # Calculate u at the center and at the two ends of the box
+    u_center = x_to_u(volume.x, bounds)
+    u_min = x_to_u(volume.x - half_length, bounds)
+    u_max = x_to_u(volume.x + half_length, bounds)
 
-    # Get REAL effective radius at this u position from actual surface data
-    eff_radius_y, eff_radius_z, center_y, center_z = bounds.get_radius_at_u(u)
+    # Get cross-sectional data at these three points
+    points_u = [u_min, u_center, u_max]
+    radii_y = []
+    radii_z = []
+    centers_y = []
+    centers_z = []
 
-    # Apply safety factor
-    safe_radius_y = eff_radius_y * safety_factor
-    safe_radius_z = eff_radius_z * safety_factor
+    for u in points_u:
+        ry, rz, cy, cz = bounds.get_radius_at_u(u)
+        radii_y.append(ry)
+        radii_z.append(rz)
+        centers_y.append(cy)
+        centers_z.append(cz)
 
-    # Check if ellipsoid fits within cross-section (relative to actual center)
-    y_extent = abs(volume.y - center_y) + volume.radius_y
-    z_extent = abs(volume.z - center_z) + volume.radius_z
+    # Use the minimum radius in the range for safety check
+    min_radius_y = min(radii_y)
+    min_radius_z = min(radii_z)
+    safe_radius_y = min_radius_y * safety_factor
+    safe_radius_z = min_radius_z * safety_factor
+
+    # Now, we need to check the entire box against these safe radii.
+    # But the center of the fuselage might change along the box. We need the worst case.
+    # For Y: the maximum distance from the box center to the fuselage center in the range?
+    # We calculate the maximum of |volume.y - center_y| for the three points.
+    max_center_offset_y = max([abs(volume.y - cy) for cy in centers_y])
+    max_center_offset_z = max([abs(volume.z - cz) for cz in centers_z])
+
+    y_extent = max_center_offset_y + half_width
+    z_extent = max_center_offset_z + half_height
 
     y_overflow = y_extent > safe_radius_y
     z_overflow = z_extent > safe_radius_z
 
     if debug and (y_overflow or z_overflow):
-        print(f"    DEBUG: Volume {volume.id} CROSS-SECTION OVERFLOW at X={volume.x:.2f} (u={u:.3f})!")
-        print(f"           REAL surface radii: Y={eff_radius_y:.2f}, Z={eff_radius_z:.2f}")
-        print(f"           REAL center: Y={center_y:.3f}, Z={center_z:.3f}")
+        print(f"    DEBUG: Volume {volume.id} CROSS-SECTION OVERFLOW!")
+        print(f"           Checked at u: {[f'{u:.3f}' for u in points_u]}")
+        print(f"           Min radii: Y={min_radius_y:.2f}, Z={min_radius_z:.2f}")
         print(f"           Safe radii (with {safety_factor:.1f} factor): Y={safe_radius_y:.2f}, Z={safe_radius_z:.2f}")
-        print(f"           Volume position: Y={volume.y:.2f}, Z={volume.z:.2f}")
-        print(f"           Volume radii: Y={volume.radius_y:.2f}, Z={volume.radius_z:.2f}")
-        print(f"           Y extent from center: {y_extent:.2f} vs safe={safe_radius_y:.2f}")
-        print(f"           Z extent from center: {z_extent:.2f} vs safe={safe_radius_z:.2f}")
+        print(f"           Max center offsets: Y={max_center_offset_y:.2f}, Z={max_center_offset_z:.2f}")
+        print(f"           Volume half-dimensions: Y={half_width:.2f}, Z={half_height:.2f}")
+        print(f"           Y extent: {y_extent:.2f} vs safe={safe_radius_y:.2f}")
+        print(f"           Z extent: {z_extent:.2f} vs safe={safe_radius_z:.2f}")
         if y_overflow:
             print(f"           Y OVERFLOW: {y_extent:.2f} > {safe_radius_y:.2f}")
         if z_overflow:
@@ -306,36 +334,75 @@ def is_ellipsoid_inside_fuselage(volume: EllipsoidVolume,
     return not (y_overflow or z_overflow)
 
 
-def volumes_collide(v1: EllipsoidVolume, v2: EllipsoidVolume, margin: float = 1.05) -> bool:
+def boxes_collide(v1: BoxVolume, v2: BoxVolume, margin: float = 1.1) -> bool:  # RIDOTTO il margin
     """
-    Check if two ellipsoid volumes collide with safety margin.
-    Uses center-to-center distance vs averaged radii sum.
+    Check if two box volumes collide with safety margin.
+    Uses axis-aligned bounding box collision detection.
     margin slightly >1 to ensure a small clearance.
     """
-    dx = v1.x - v2.x
-    dy = v1.y - v2.y
-    dz = v1.z - v2.z
-    dist_sq = dx * dx + dy * dy + dz * dz
+    # Calcola half-dimensions al volo
+    half_length1 = v1.length / 2.0
+    half_width1 = v1.width / 2.0
+    half_height1 = v1.height / 2.0
 
-    # Use average radius for collision detection
-    r1 = (v1.radius_x + v1.radius_y + v1.radius_z) / 3
-    r2 = (v2.radius_x + v2.radius_y + v2.radius_z) / 3
-    min_dist = (r1 + r2) * margin
+    half_length2 = v2.length / 2.0
+    half_width2 = v2.width / 2.0
+    half_height2 = v2.height / 2.0
 
-    return dist_sq < (min_dist * min_dist)
+    # Check for separation along each axis
+    x_overlap = (abs(v1.x - v2.x) < (half_length1 + half_length2) * margin)
+    y_overlap = (abs(v1.y - v2.y) < (half_width1 + half_width2) * margin)
+    z_overlap = (abs(v1.z - v2.z) < (half_height1 + half_height2) * margin)
+
+    # Collision occurs if there's overlap in all three axes
+    return x_overlap and y_overlap and z_overlap
 
 
-def respects_distance_constraints_against_manual(vol: EllipsoidVolume,
-                                                 manual_volumes: List[EllipsoidVolume],
+def is_valid_against_placed_and_constraints(new_volume: BoxVolume,
+                                            placed_volumes: List[BoxVolume],
+                                            manual_volumes: List[BoxVolume],
+                                            bounds: FuselageBounds,
+                                            debug: bool = False) -> bool:
+    """
+    Combined validator:
+    - inside fuselage
+    - no collision with already placed volumes
+    - respects distance constraints against ALL manual volumes (even not placed)
+    """
+    # Inside fuselage - PRIMO controllo
+    if not is_box_inside_fuselage(new_volume, bounds, Config.SAFETY_MARGIN, debug):
+        if debug:
+            print(f"    -> Volume {new_volume.id} OUTSIDE fuselage (skipped)")
+        return False
+
+    # Collision with placed volumes - SECONDO controllo
+    for pv in placed_volumes:
+        if boxes_collide(new_volume, pv):
+            if debug:
+                print(f"    DEBUG: Volume {new_volume.id} COLLIDES with placed Volume {pv.id}")
+            return False
+
+    # Distance constraints vs ALL manual volumes (absolute) - TERZO controllo
+    # MODIFICATO: Ora controlla contro tutti i volumi manuali, non solo quelli piazzati
+    if not respects_distance_constraints_against_manual(new_volume, manual_volumes, debug):
+        if debug:
+            print(f"    -> Volume {new_volume.id} violates distance constraints (skipped)")
+        return False
+
+    return True
+
+
+def respects_distance_constraints_against_manual(vol: BoxVolume,
+                                                 manual_volumes: List[BoxVolume],
                                                  debug: bool = False) -> bool:
     """
     Check if 'vol' respects all its distance constraints relative to
-    the manual_volumes list (even if the target hasn't been placed yet).
+    ALL manual volumes (even if the target hasn't been placed yet).
     """
     if not vol.distance_constraints:
         return True
 
-    # Build lookup by id for manual volumes
+    # Build lookup by id for ALL manual volumes
     lookup = {v.id: v for v in manual_volumes}
     for target_id, min_dist in vol.distance_constraints:
         target = lookup.get(target_id)
@@ -343,6 +410,10 @@ def respects_distance_constraints_against_manual(vol: EllipsoidVolume,
             # If target not in manual list, ignore (user likely referenced non-existent id)
             if debug:
                 print(f"    DEBUG: Volume {vol.id} has constraint to missing Volume {target_id}, ignoring.")
+            continue
+
+        # Skip self-constraint
+        if target_id == vol.id:
             continue
 
         dx = vol.x - target.x
@@ -356,54 +427,12 @@ def respects_distance_constraints_against_manual(vol: EllipsoidVolume,
             return False
 
     return True
-
-
-def is_valid_against_placed_and_constraints(new_volume: EllipsoidVolume,
-                                            placed_volumes: List[EllipsoidVolume],
-                                            manual_volumes: List[EllipsoidVolume],
-                                            bounds: FuselageBounds,
-                                            debug: bool = False) -> bool:
-    """
-    Combined validator:
-    - inside fuselage
-    - no collision with already placed volumes
-    - respects distance constraints against manual list (absolute)
-    """
-    # Inside fuselage
-    if not is_ellipsoid_inside_fuselage(new_volume, bounds, Config.SAFETY_MARGIN, debug):
-        if debug:
-            print(f"    -> Volume {new_volume.id} OUTSIDE fuselage (skipped)")
-        return False
-
-    # Collision with placed volumes
-    for pv in placed_volumes:
-        if volumes_collide(new_volume, pv):
-            if debug:
-                dx = new_volume.x - pv.x
-                dy = new_volume.y - pv.y
-                dz = new_volume.z - pv.z
-                distance = math.sqrt(dx * dx + dy * dy + dz * dz)
-                rsum = ((new_volume.radius_x + pv.radius_x) / 2.0 + (new_volume.radius_y + pv.radius_y) / 2.0 + (
-                        new_volume.radius_z + pv.radius_z) / 2.0) / 3.0
-                print(f"    DEBUG: Volume {new_volume.id} COLLIDES with placed Volume {pv.id}")
-                print(f"           Distance={distance:.3f}, Approx.Required>={(rsum * 1.05):.3f}")
-            return False
-
-    # Distance constraints vs manual list (absolute)
-    if not respects_distance_constraints_against_manual(new_volume, manual_volumes, debug):
-        if debug:
-            print(f"    -> Volume {new_volume.id} violates distance constraints (skipped)")
-        return False
-
-    return True
-
-
 # ====================
 # Manual placement function
 # ====================
 def place_manual_volumes(fuse_id: str,
                          bounds: FuselageBounds,
-                         manual_volumes: List[EllipsoidVolume]) -> List[EllipsoidVolume]:
+                         manual_volumes: List[BoxVolume]) -> List[BoxVolume]:
     """
     Place manually-defined volumes, checking real geometry, collisions,
     and custom distance constraints. Skip invalid ones.
@@ -421,27 +450,27 @@ def place_manual_volumes(fuse_id: str,
             print(f"    ✗ Volume {vol.id} skipped (invalid / constraint / collision)")
             continue
 
-        # Create the ellipsoid in OpenVSP
-        ellipsoid_id = vsp.AddGeom("ELLIPSOID", "")
+        # Create the box in OpenVSP
+        box_id = vsp.AddGeom("Box", "")
 
-        #Giving a name for each volume
+        # Giving a name for each volume
         geom_name = f"Volume_{vol.id}"
-        vsp.SetGeomName(ellipsoid_id, geom_name)
+        vsp.SetGeomName(box_id, geom_name)
 
-        #Define the parameters
-        vsp.SetParmValUpdate(ellipsoid_id, "Abs_Or_Relitive_flag", "XForm", 0)
-        vsp.SetParmValUpdate(ellipsoid_id, "Trans_Attach_Flag", "Attach", 0)
-        vsp.SetParmValUpdate(ellipsoid_id, "X_Location", "XForm", vol.x)
-        vsp.SetParmValUpdate(ellipsoid_id, "Y_Location", "XForm", vol.y)
-        vsp.SetParmValUpdate(ellipsoid_id, "Z_Location", "XForm", vol.z)
+        # Define the parameters
+        vsp.SetParmValUpdate(box_id, "Abs_Or_Relitive_flag", "XForm", 0)
+        vsp.SetParmValUpdate(box_id, "Trans_Attach_Flag", "Attach", 0)
+        vsp.SetParmValUpdate(box_id, "X_Location", "XForm", vol.x)
+        vsp.SetParmValUpdate(box_id, "Y_Location", "XForm", vol.y)
+        vsp.SetParmValUpdate(box_id, "Z_Location", "XForm", vol.z)
 
         try:
-            # OpenVSP ellipsoid parameters are A_Radius (X), B_Radius (Y), C_Radius (Z)
-            vsp.SetParmValUpdate(ellipsoid_id, "A_Radius", "Design", vol.radius_x)
-            vsp.SetParmValUpdate(ellipsoid_id, "B_Radius", "Design", vol.radius_y)
-            vsp.SetParmValUpdate(ellipsoid_id, "C_Radius", "Design", vol.radius_z)
+            # OpenVSP box parameters are Length, Width, Height
+            vsp.SetParmValUpdate(box_id, "Length", "Design", vol.length)
+            vsp.SetParmValUpdate(box_id, "Width", "Design", vol.width)
+            vsp.SetParmValUpdate(box_id, "Height", "Design", vol.height)
         except Exception as e:
-            print(f"    Warning: could not set radii for Volume {vol.id}: {e}")
+            print(f"    Warning: could not set dimensions for Volume {vol.id}: {e}")
 
         vsp.Update()
         placed.append(vol)
@@ -450,6 +479,7 @@ def place_manual_volumes(fuse_id: str,
     print(f"\n  ✓ Total valid volumes placed: {len(placed)}/{len(manual_volumes)}")
 
     return placed
+
 
 # ====================
 # Save configuration (modified for single config with auto-numbering)
@@ -477,8 +507,8 @@ def get_next_config_number(output_dir: str) -> int:
     return max(existing_configs) + 1
 
 
-def save_constraints_csv(manual_volumes: List[EllipsoidVolume],
-                         placed_volumes: List[EllipsoidVolume],
+def save_constraints_csv(manual_volumes: List[BoxVolume],
+                         placed_volumes: List[BoxVolume],
                          conf_dir: str):
     """
     Save a CSV file with all distance constraints and their verification status
@@ -546,7 +576,7 @@ def save_constraints_csv(manual_volumes: List[EllipsoidVolume],
     return len(constraints_list)
 
 
-def save_configuration(volumes: List[EllipsoidVolume],
+def save_configuration(volumes: List[BoxVolume],
                        bounds: FuselageBounds,
                        output_dir: str):
     """
@@ -586,6 +616,7 @@ def save_configuration(volumes: List[EllipsoidVolume],
         "configuration": conf_num,
         "num_volumes": len(volumes),
         "num_constraints": num_constraints,
+        "geometry_type": "BOX",
         "sampling_method": "REAL_SURFACE_GEOMETRY",
         "sampling_params": {
             "u_samples": Config.U_SAMPLES,
@@ -624,36 +655,35 @@ def save_configuration(volumes: List[EllipsoidVolume],
 # Manual volumes definition (10 volumes)
 # Modify positions/dimensions/constraints
 # ====================
-def get_manual_volumes_example() -> List[EllipsoidVolume]:
+def get_manual_volumes_example() -> List[BoxVolume]:
     """
-    Return a list of 10 manually defined EllipsoidVolume objects.
+    Return a list of 10 manually defined BoxVolume objects.
     Units: meters. Distance constraints in meters.
-    Edit this function to set positions/dimensions.
+    Test cases for various failure scenarios.
     """
     mv = [
-        EllipsoidVolume(id=1, x=0.50, y=0.00, z=0.00, length=0.40, width=0.40, height=0.40,
-                        distance_constraints=[(2, 0.6), (3, 0.8), (4, 0.6)]),
-        EllipsoidVolume(id=2, x=1.10, y=0.10, z=0.00, length=0.30, width=0.30, height=0.30,
-                        distance_constraints=[(1, 0.6), (3, 0.25), (5, 0.5)]),
-        EllipsoidVolume(id=3, x=1.80, y=-0.10, z=0.00, length=0.50, width=0.40, height=0.40,
-                        distance_constraints=[(1, 0.8), (6, 0.4)]),
-        EllipsoidVolume(id=4, x=2.50, y=0.00, z=0.10, length=0.35, width=0.35, height=0.35,
-                        distance_constraints=[(1, 0.6), (5, 0.5), (7, 0.35)]),
-        EllipsoidVolume(id=5, x=3.05, y=0.12, z=-0.05, length=0.45, width=0.40, height=0.30,
-                        distance_constraints=[(2, 0.5), (4, 0.5), (8, 0.55)]),
-        EllipsoidVolume(id=6, x=3.60, y=-0.20, z=0.05, length=0.30, width=0.30, height=0.30,
-                        distance_constraints=[(3, 0.4), (7, 0.4), (10, 1.0)]),
-        EllipsoidVolume(id=7, x=4.20, y=0.00, z=0.00, length=0.40, width=0.40, height=0.40,
-                        distance_constraints=[(4, 0.35), (6, 0.4), (10, 0.38)]),
-        EllipsoidVolume(id=8, x=4.80, y=0.15, z=-0.10, length=0.30, width=0.30, height=0.30,
-                        distance_constraints=[(5, 0.55)]),
-        EllipsoidVolume(id=9, x=19.00, y=-0.12, z=0.08, length=0.50, width=0.45, height=0.40,
-                        distance_constraints=[(3, 1.2)]),
-        EllipsoidVolume(id=10, x=5.95, y=0.00, z=0.00, length=0.60, width=0.50, height=0.45,
-                        distance_constraints=[(6, 1.0), (7, 0.38)]),
+        BoxVolume(id=1, x=0.50, y=0.00, z=0.00, length=0.40, width=0.40, height=0.40,
+                  distance_constraints=[(2, 0.6), (3, 0.8), (4, 0.6)]),
+        BoxVolume(id=2, x=1.10, y=0.10, z=0.00, length=0.30, width=0.30, height=0.30,
+                  distance_constraints=[(1, 0.6), (3, 0.25), (5, 0.5)]),
+        BoxVolume(id=3, x=1.80, y=-0.10, z=0.00, length=0.50, width=0.40, height=0.40,
+                  distance_constraints=[(1, 0.8), (6, 0.4)]),
+        BoxVolume(id=4, x=2.50, y=0.00, z=0.10, length=0.35, width=0.35, height=0.35,
+                  distance_constraints=[(1, 0.6), (5, 0.5), (7, 0.35)]),
+        BoxVolume(id=5, x=3.05, y=0.12, z=-0.05, length=0.45, width=0.40, height=0.30,
+                  distance_constraints=[(2, 0.5), (4, 0.5), (8, 0.55)]),
+        BoxVolume(id=6, x=3.60, y=-0.20, z=0.05, length=0.30, width=0.30, height=0.30,
+                  distance_constraints=[(3, 0.4), (7, 0.4), (10, 1.0)]),
+        BoxVolume(id=7, x=4.20, y=0.00, z=0.00, length=0.40, width=0.40, height=0.40,
+                  distance_constraints=[(4, 0.35), (6, 0.4), (10, 0.38)]),
+        BoxVolume(id=8, x=4.80, y=0.15, z=-0.10, length=0.30, width=0.30, height=0.30,
+                  distance_constraints=[(5, 0.55)]),
+        BoxVolume(id=9, x=19.00, y=-0.12, z=0.08, length=0.50, width=0.45, height=0.40,
+                  distance_constraints=[(3, 1.2)]),
+        BoxVolume(id=10, x=5.95, y=0.00, z=0.00, length=0.60, width=0.50, height=0.45,
+                  distance_constraints=[(6, 1.0), (7, 0.38)]),
     ]
     return mv
-
 
 # ====================
 # Main Execution
@@ -663,7 +693,7 @@ def main():
 
     print("=" * 70)
     print("OpenVSP Manual Volume Placement - REAL SURFACE GEOMETRY + Distance Constraints")
-    print("Single Configuration with Auto-numbering")
+    print("Using BOX Geometry - Single Configuration with Auto-numbering")
     print("=" * 70)
     print("Using vsp.CompPnt01() to sample actual surface points")
     print("=" * 70)
@@ -709,6 +739,7 @@ def main():
     print(f"   → Configuration: conf{conf_num}")
     print(f"   → Output directory: {Config.OUTPUT_DIR}/conf{conf_num}/")
     print(f"   → Valid volumes placed: {len(volumes)}/{len(manual_volumes)}")
+    print(f"   → Geometry type: BOX")
     print(f"   → Contains: VSP3 + CSV + JSON + Constraints CSV with REAL surface data")
     print("=" * 70)
 
