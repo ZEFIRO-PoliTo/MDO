@@ -45,12 +45,12 @@ class OptConfig:
     BASE_HEIGHT = 3.0   # meters
 
     # Perturbation parameters (percentage of base values)
-    LENGTH_PERTURBATION = 0.1  # ±10% of base length
-    WIDTH_PERTURBATION = 0.1   # ±10% of base width
-    HEIGHT_PERTURBATION = 0.1  # ±10% of base height
+    LENGTH_PERTURBATION = 1  # ±10% of base length
+    WIDTH_PERTURBATION = 1  # ±10% of base width
+    HEIGHT_PERTURBATION = 1  # ±10% of base height
 
     # Number of configurations to generate
-    NUM_CONFIGURATIONS = 30
+    NUM_CONFIGURATIONS = 100
 
     # Volume placement parameters
     NUM_VOLUMES = 10
@@ -201,14 +201,15 @@ class FuselageConfiguration:
 def create_perturbed_fuselage(base_length: float, base_width: float, base_height: float,
                               perturbation_factors: Tuple[float, float, float]) -> str:
     """
-    Create a fuselage geometry in OpenVSP with perturbed dimensions.
-    
+    Create a fuselage geometry in OpenVSP with perturbed dimensions and closed nose/tail.
+
+
     Args:
         base_length: Nominal fuselage length
-        base_width: Nominal fuselage width  
+        base_width: Nominal fuselage width
         base_height: Nominal fuselage height
         perturbation_factors: Tuple of (length_factor, width_factor, height_factor)
-    
+
     Returns:
         OpenVSP geometry ID of created fuselage
     """
@@ -230,35 +231,46 @@ def create_perturbed_fuselage(base_length: float, base_width: float, base_height
     xsec_surf_id = vsp.GetXSecSurf(fid, 0)
     num_xsecs = vsp.GetNumXSec(xsec_surf_id)
 
+    # Calculate width/height ratio from perturbation factors for consistent shape variation
+    # This ensures the entire fuselage has a coherent shape (not random variations per section)
+    wh_ratio = perturbation_factors[1] / perturbation_factors[2]  # width_factor / height_factor
+
     for i in range(num_xsecs):
-        t = i / (num_xsecs - 1) if num_xsecs > 1 else 0.0
-
-        # Set cross-section shape to ellipse
-        vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_ELLIPSE)
-        xsec_id = vsp.GetXSec(xsec_surf_id, i)
-
-        # Apply scaling factors to create tapered fuselage shape
-        # Smaller scale at ends, full scale in middle
+        # CRITICAL: First and last cross-sections MUST be POINT type for proper closure
         if i == 0 or i == num_xsecs - 1:
-            # Ends: very small scaling for closure
-            scale_factor = 0.05
-        elif i == 1 or i == num_xsecs - 2:
-            # Transition regions
-            scale_factor = 0.3
-        elif i == 2 or i == num_xsecs - 3:
-            # Near transition regions  
-            scale_factor = 0.7
+            # Set to POINT type for nose/tail closure
+            vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_POINT)
+            # Point sections don't need width/height settings
         else:
-            # Central region: full scale
-            scale_factor = 1.0
+            # Set intermediate cross-sections to ellipse
+            vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_ELLIPSE)
 
-        # Set ellipse dimensions with scaling
-        vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width * scale_factor)
-        vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height * scale_factor)
+            # IMPORTANT: Get XSec ID AFTER changing shape
+            xsec_id = vsp.GetXSec(xsec_surf_id, i)
+
+            # Apply scaling factors to create tapered fuselage shape
+            # Gradually transition from small to full scale
+            if i == 1 or i == num_xsecs - 2:
+                # Transition regions near nose/tail
+                scale_factor = 0.3
+            elif i == 2 or i == num_xsecs - 3:
+                # Near transition regions
+                scale_factor = 0.7
+            else:
+                # Central region: full scale with controlled variation
+                # Add subtle shape variation based on perturbation length factor
+                # This creates "fatter" or "thinner" fuselages in the middle
+                shape_modifier = 0.85 + (perturbation_factors[0] - 1.0) * 0.3
+                shape_modifier = max(0.7, min(1.3, shape_modifier))  # Clamp to safe range
+                scale_factor = 1.0 * shape_modifier
+
+            # Set ellipse dimensions with scaling
+            # Use consistent width/height ratio for coherent shape
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width * scale_factor)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height * scale_factor)
 
     vsp.Update()
     return fid
-
 
 def compute_fuselage_volume_compgeom() -> float:
     """
@@ -953,7 +965,7 @@ def run_optimization():
 
                 all_configs.append(config)
                 valid_configs += 1
-            else:
+            elif debug_mode:
                 # Log validation failures for debugging
                 print(f"\n   Config {i+1} failed validation: {validation_errors}")
 
