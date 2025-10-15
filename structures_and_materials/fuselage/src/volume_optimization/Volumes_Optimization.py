@@ -20,7 +20,7 @@ import os
 import json
 import csv
 import math
-from typing import List, Dict, Tuple, Optional
+from typing import List, Tuple, Optional
 from dataclasses import dataclass, asdict, field
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -45,9 +45,9 @@ class OptConfig:
     BASE_HEIGHT = 3.0   # meters
 
     # Perturbation parameters (percentage of base values)
-    LENGTH_PERTURBATION = 1  # ±10% of base length
-    WIDTH_PERTURBATION = 1  # ±10% of base width
-    HEIGHT_PERTURBATION = 1  # ±10% of base height
+    LENGTH_PERTURBATION = 0.1  # ±10% of base length
+    WIDTH_PERTURBATION = 0.1  # ±10% of base width
+    HEIGHT_PERTURBATION = 0.1  # ±10% of base height
 
     # Number of configurations to generate
     NUM_CONFIGURATIONS = 100
@@ -231,10 +231,6 @@ def create_perturbed_fuselage(base_length: float, base_width: float, base_height
     xsec_surf_id = vsp.GetXSecSurf(fid, 0)
     num_xsecs = vsp.GetNumXSec(xsec_surf_id)
 
-    # Calculate width/height ratio from perturbation factors for consistent shape variation
-    # This ensures the entire fuselage has a coherent shape (not random variations per section)
-    wh_ratio = perturbation_factors[1] / perturbation_factors[2]  # width_factor / height_factor
-
     for i in range(num_xsecs):
         # CRITICAL: First and last cross-sections MUST be POINT type for proper closure
         if i == 0 or i == num_xsecs - 1:
@@ -280,7 +276,7 @@ def compute_fuselage_volume_compgeom() -> float:
         Fuselage volume in cubic meters, or 0.0 if computation fails
     """
     # Run CompGeom analysis on all geometries
-    mesh_id = vsp.ComputeCompGeom(vsp.SET_ALL, False, 0)
+    vsp.ComputeCompGeom(vsp.SET_ALL, False, 0)
     result_id = vsp.FindLatestResultsID("Comp_Geom")
 
     if not result_id:
@@ -304,7 +300,7 @@ def compute_fuselage_volume_compgeom() -> float:
 def get_manual_volumes() -> List[BoxVolume]:
     """
     Define the 10 volumes with their dimensions and distance constraints.
-    
+
     Returns:
         List of BoxVolume objects with pre-defined constraints between specific volumes
     """
@@ -338,10 +334,10 @@ def get_manual_volumes() -> List[BoxVolume]:
 def analyze_fuselage_geometry(fuse_id: str) -> FuselageBounds:
     """
     Analyze fuselage geometry by sampling surface points and extracting cross-sections.
-    
+
     Args:
         fuse_id: OpenVSP geometry ID of the fuselage
-        
+
     Returns:
         FuselageBounds object with complete geometric information
     """
@@ -415,11 +411,11 @@ def analyze_fuselage_geometry(fuse_id: str) -> FuselageBounds:
 def x_to_u(x: float, bounds: FuselageBounds) -> float:
     """
     Convert X coordinate to normalized U parameter (0-1) along fuselage length.
-    
+
     Args:
         x: X coordinate in meters
         bounds: Fuselage bounds information
-        
+
     Returns:
         U parameter between 0 and 1
     """
@@ -435,21 +431,21 @@ def generate_box_surface_points(volume: BoxVolume, points_per_edge: int = 3) -> 
     """
     Generate multiple test points on the surface of a box volume.
     Includes vertices, edge centers, and face centers for comprehensive coverage.
-    
+
     Args:
         volume: Box volume to generate points for
         points_per_edge: Number of points to generate along each edge
-        
+
     Returns:
         List of (x, y, z) coordinates for test points
     """
     points = []
-    
+
     # Generate coordinates along each axis
     x_coords = np.linspace(-volume.half_length, volume.half_length, points_per_edge)
     y_coords = np.linspace(-volume.half_width, volume.half_width, points_per_edge)
     z_coords = np.linspace(-volume.half_height, volume.half_height, points_per_edge)
-    
+
     # Add all 8 vertices of the box
     for dx in [-volume.half_length, volume.half_length]:
         for dy in [-volume.half_width, volume.half_width]:
@@ -459,23 +455,23 @@ def generate_box_surface_points(volume: BoxVolume, points_per_edge: int = 3) -> 
                     volume.y + dy,
                     volume.z + dz
                 ))
-    
+
     # Add 12 edge midpoints
     # X-axis edges (constant X, varying Y and Z)
     for dy in [-volume.half_width, volume.half_width]:
         for dz in [-volume.half_height, volume.half_height]:
             points.append((volume.x, volume.y + dy, volume.z + dz))
-    
+
     # Y-axis edges (constant Y, varying X and Z)
     for dx in [-volume.half_length, volume.half_length]:
         for dz in [-volume.half_height, volume.half_height]:
             points.append((volume.x + dx, volume.y, volume.z + dz))
-    
+
     # Z-axis edges (constant Z, varying X and Y)
     for dx in [-volume.half_length, volume.half_length]:
         for dy in [-volume.half_width, volume.half_width]:
             points.append((volume.x + dx, volume.y + dy, volume.z))
-    
+
     # Add additional points along edges for better coverage (excluding endpoints)
     if points_per_edge > 2:
         for axis in ['x', 'y', 'z']:
@@ -491,96 +487,95 @@ def generate_box_surface_points(volume: BoxVolume, points_per_edge: int = 3) -> 
                 for dx in x_coords[1:-1]:
                     for dy in y_coords[1:-1]:
                         points.append((volume.x + dx, volume.y + dy, volume.z))
-    
+
     return points
 
 
-def find_surface_distance_at_angle(cross_section: CrossSection, angle: float, surf_indx: int) -> Optional[float]:
+def find_surface_distance_at_angle(cross_section: CrossSection, angle: float) -> Optional[float]:
     """
     Calculate distance from fuselage center to surface at a specific angle.
     Uses elliptical approximation based on cross-section radii.
-    
+
     Args:
         cross_section: Cross-sectional data
         angle: Angle in radians from positive Y axis
-        surf_indx: Surface index (unused but kept for interface consistency)
-        
+
     Returns:
         Distance from center to surface, or None if calculation fails
     """
     # For an ellipse, the distance from center to surface at angle theta is:
     # r = (a * b) / sqrt((b*cos(theta))^2 + (a*sin(theta))^2)
     # where a = radius_y, b = radius_z
-    
+
     a = cross_section.radius_y
     b = cross_section.radius_z
-    
+
     if a <= 0 or b <= 0:
         return None
-    
+
     # Calculate the elliptical radius at this angle
     cos_theta = math.cos(angle)
     sin_theta = math.sin(angle)
-    
+
     denominator = math.sqrt((b * cos_theta)**2 + (a * sin_theta)**2)
     if denominator == 0:
         return min(a, b)
-    
+
     surface_dist = (a * b) / denominator
-    
+
     return surface_dist
 
 
-def is_point_inside_fuselage(x: float, y: float, z: float, 
-                            bounds: FuselageBounds, 
+def is_point_inside_fuselage(x: float, y: float, z: float,
+                            bounds: FuselageBounds,
                             safety_factor: float = OptConfig.SAFETY_MARGIN,
                             debug: bool = False) -> bool:
     """
     Check if a point is inside the fuselage by comparing to surface distance.
-    
+
     Args:
         x, y, z: Point coordinates to check
         bounds: Fuselage geometry information
         safety_factor: Multiplier for surface distance to provide safety margin
         debug: Enable debug output
-        
+
     Returns:
         True if point is inside fuselage, False otherwise
     """
     # Convert point X to U parameter along fuselage
     u = x_to_u(x, bounds)
-    
+
     # Find the closest cross-section to this U position
     target_cs = None
     min_u_diff = float('inf')
-    
+
     for cs in bounds.cross_sections:
         u_diff = abs(cs.u - u)
         if u_diff < min_u_diff:
             min_u_diff = u_diff
             target_cs = cs
-    
+
     if target_cs is None:
         return False
-    
+
     # Calculate vector from fuselage center to point
     dy = y - target_cs.center_y
     dz = z - target_cs.center_z
-    
+
     # Calculate angle of point relative to fuselage center
     angle = math.atan2(dz, dy) if dy != 0 or dz != 0 else 0
-    
+
     # Find distance to fuselage surface at this angle
-    surface_dist = find_surface_distance_at_angle(target_cs, angle, bounds.surf_indx)
+    surface_dist = find_surface_distance_at_angle(target_cs, angle)
     if surface_dist is None:
         return False
-    
+
     # Calculate actual distance from center to point
     point_dist = math.sqrt(dy*dy + dz*dz)
-    
+
     # Apply safety margin to surface distance
     safe_surface_dist = surface_dist * safety_factor
-    
+
     # Point is inside if its distance is less than the safe surface distance
     return point_dist <= safe_surface_dist
 
@@ -592,13 +587,13 @@ def is_box_inside_fuselage(volume: BoxVolume,
     """
     Check if a box volume is fully contained within the fuselage.
     Verifies multiple surface points against actual fuselage geometry.
-    
+
     Args:
         volume: Box volume to check
-        bounds: Fuselage geometry information  
+        bounds: Fuselage geometry information
         safety_factor: Safety margin for placement
         debug: Enable debug output
-        
+
     Returns:
         True if all box points are inside fuselage, False otherwise
     """
@@ -611,7 +606,7 @@ def is_box_inside_fuselage(volume: BoxVolume,
 
     # Generate multiple test points on the box surface
     test_points = generate_box_surface_points(volume, points_per_edge=3)
-    
+
     # Check each test point against fuselage surface
     for i, (vx, vy, vz) in enumerate(test_points):
         if not is_point_inside_fuselage(vx, vy, vz, bounds, safety_factor, debug):
@@ -626,12 +621,12 @@ def is_box_inside_fuselage(volume: BoxVolume,
 def boxes_collide(v1: BoxVolume, v2: BoxVolume, margin: float = OptConfig.COLLISION_MARGIN) -> bool:
     """
     Check if two box volumes collide using axis-aligned bounding box detection.
-    
+
     Args:
         v1: First box volume
-        v2: Second box volume  
+        v2: Second box volume
         margin: Safety margin multiplier for collision detection
-        
+
     Returns:
         True if boxes collide, False otherwise
     """
@@ -647,12 +642,12 @@ def boxes_collide(v1: BoxVolume, v2: BoxVolume, margin: float = OptConfig.COLLIS
 def respects_distance_constraints(vol: BoxVolume, placed_volumes: List[BoxVolume], debug: bool = False) -> bool:
     """
     Check if a volume respects all its distance constraints with placed volumes.
-    
+
     Args:
         vol: Volume to check constraints for
         placed_volumes: List of already placed volumes
         debug: Enable debug output
-        
+
     Returns:
         True if all constraints are satisfied, False otherwise
     """
@@ -661,7 +656,7 @@ def respects_distance_constraints(vol: BoxVolume, placed_volumes: List[BoxVolume
 
     # Build dictionary for quick volume lookup by ID
     lookup = {v.id: v for v in placed_volumes}
-    
+
     # Check each distance constraint
     for target_id, min_dist in vol.distance_constraints:
         target = lookup.get(target_id)
@@ -678,7 +673,7 @@ def respects_distance_constraints(vol: BoxVolume, placed_volumes: List[BoxVolume
         dy = vol.y - target.y
         dz = vol.z - target.z
         dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-        
+
         # Check if distance meets minimum requirement
         if dist < min_dist:
             return False
@@ -693,13 +688,13 @@ def is_valid_placement(new_volume: BoxVolume,
     """
     Comprehensive validation for volume placement.
     Combines fuselage containment, collision detection, and distance constraints.
-    
+
     Args:
         new_volume: Volume to validate
         placed_volumes: List of already placed volumes
         bounds: Fuselage geometry information
         debug: Enable debug output
-        
+
     Returns:
         True if placement is valid, False otherwise
     """
@@ -722,18 +717,17 @@ def is_valid_placement(new_volume: BoxVolume,
 # ====================
 # Volume Placement Functions
 # ====================
-def place_volumes_in_fuselage(fuse_id: str, bounds: FuselageBounds,
+def place_volumes_in_fuselage(bounds: FuselageBounds,
                               base_volumes: List[BoxVolume],
                               debug: bool = False) -> Tuple[List[BoxVolume], int]:
     """
     Attempt to place all volumes in the fuselage with random placement and validation.
-    
+
     Args:
-        fuse_id: OpenVSP fuselage geometry ID
         bounds: Fuselage geometry information
         base_volumes: List of volumes to place
         debug: Enable debug output
-        
+
     Returns:
         Tuple of (placed_volumes, num_skipped) where:
         - placed_volumes: List of successfully placed volumes with positions
@@ -798,7 +792,7 @@ def place_volumes_in_fuselage(fuse_id: str, bounds: FuselageBounds,
 def create_volumes_in_vsp(volumes: List[BoxVolume]):
     """
     Create physical box geometries in OpenVSP from placed volume data.
-    
+
     Args:
         volumes: List of placed volumes with positions and dimensions
     """
@@ -832,33 +826,33 @@ def create_volumes_in_vsp(volumes: List[BoxVolume]):
 def validate_configuration(volumes: List[BoxVolume], bounds: FuselageBounds) -> Tuple[bool, List[str]]:
     """
     Comprehensive validation of a complete volume configuration.
-    
+
     Args:
         volumes: List of placed volumes to validate
         bounds: Fuselage geometry information
-        
+
     Returns:
         Tuple of (is_valid, error_messages) where:
         - is_valid: True if configuration passes all checks
         - error_messages: List of validation error descriptions
     """
     errors = []
-    
+
     # Validate each volume individually
     for i, vol in enumerate(volumes):
         # Check if volume is inside fuselage
         if not is_box_inside_fuselage(vol, bounds, OptConfig.SAFETY_MARGIN):
             errors.append(f"Volume {vol.id} is outside fuselage bounds")
-        
+
         # Check for collisions with other volumes
         for j, other_vol in enumerate(volumes):
             if i != j and boxes_collide(vol, other_vol):
                 errors.append(f"Volume {vol.id} collides with Volume {other_vol.id}")
-        
+
         # Check distance constraints
         if not respects_distance_constraints(vol, volumes):
             errors.append(f"Volume {vol.id} violates distance constraints")
-    
+
     return len(errors) == 0, errors
 
 
@@ -868,10 +862,10 @@ def validate_configuration(volumes: List[BoxVolume], bounds: FuselageBounds) -> 
 def generate_perturbation_factors(config: type) -> List[Tuple[float, float, float]]:
     """
     Generate random perturbation factors for fuselage dimensions.
-    
+
     Args:
         config: Configuration class with perturbation parameters
-        
+
     Returns:
         List of (length_factor, width_factor, height_factor) tuples
     """
@@ -917,8 +911,8 @@ def run_optimization():
     valid_configs = 0
 
     # Process each configuration with progress bar
-    for i, (lf, wf, hf) in enumerate(tqdm(perturbation_factors, 
-                                         desc="Configurations", 
+    for i, (lf, wf, hf) in enumerate(tqdm(perturbation_factors,
+                                         desc="Configurations",
                                          unit="config",
                                          ncols=100)):
         debug_mode = False  # Disable detailed debug output for performance
@@ -937,14 +931,14 @@ def run_optimization():
 
         # Attempt to place all volumes with constraints
         placed_volumes, num_skipped = place_volumes_in_fuselage(
-            fuse_id, bounds, base_volumes, debug=debug_mode
+            bounds, base_volumes, debug=debug_mode
         )
 
         # Only consider configurations where ALL volumes are successfully placed
         if num_skipped == 0:
             # Final validation to ensure configuration integrity
             is_valid, validation_errors = validate_configuration(placed_volumes, bounds)
-            
+
             if is_valid:
                 # Calculate volume metrics
                 total_boxes_volume = sum([v.length * v.width * v.height for v in placed_volumes])
@@ -1008,7 +1002,7 @@ def run_optimization():
         # Final validation before saving to ensure data consistency
         current_bounds = analyze_fuselage_geometry(fuse_id)
         is_valid, validation_errors = validate_configuration(config.volumes_placed, current_bounds)
-        
+
         if not is_valid:
             print(f"\n   WARNING: Configuration {config.config_id} failed final validation!")
             print(f"   Errors: {validation_errors}")
@@ -1071,7 +1065,7 @@ def run_optimization():
 def save_volumes_positions_csv(placed_volumes: List[BoxVolume], conf_dir: str):
     """
     Save volume positions and dimensions to CSV file.
-    
+
     Args:
         placed_volumes: List of placed volumes with positions
         conf_dir: Directory to save CSV file in
@@ -1099,7 +1093,7 @@ def save_constraints_csv(placed_volumes: List[BoxVolume],
                          conf_dir: str):
     """
     Save distance constraint verification results to CSV file.
-    
+
     Args:
         placed_volumes: List of successfully placed volumes
         all_volumes: All volume definitions including constraints
@@ -1164,7 +1158,7 @@ def generate_plots(all_configs: List[FuselageConfiguration],
                    top_configs: List[FuselageConfiguration]):
     """
     Generate analysis plots for optimization results.
-    
+
     Args:
         all_configs: All valid configurations found
         top_configs: Top N configurations selected
@@ -1243,9 +1237,4 @@ def generate_plots(all_configs: List[FuselageConfiguration],
 # Entry Point
 # ====================
 if __name__ == "__main__":
-    try:
-        run_optimization()
-    except Exception as e:
-        print(f"\n[ERROR] Optimization failed: {e}")
-        import traceback
-        traceback.print_exc()
+    run_optimization()
