@@ -23,7 +23,7 @@ import os
 import json
 import csv
 import math
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional
 from dataclasses import dataclass, asdict, field
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -78,6 +78,9 @@ class OptConfig:
     ANALYSIS_VINF = 150.0  # m/s
     ANALYSIS_ALTITUDE = 6096.0  # m
     ANALYSIS_DELTA_TEMP = 0.0  # K
+
+    # Conversion factor: meters to feet
+    METERS_TO_FEET = 3.28084
 
 
 # ====================
@@ -185,6 +188,7 @@ class FuselageConfiguration:
     remaining_volume: float  # Unused volume in fuselage
     num_volumes_skipped: int = 0  # Volumes that couldn't be placed
     vsp_file: str = ""  # Path to saved VSP file
+    vsp_file_empty: str = ""  # Path to saved empty VSP file (feet-based)
     bounds: Optional[FuselageBounds] = None  # Geometric bounds for validation
     cd_value: float = 0.0  # Parasite drag coefficient from aerodynamic analysis
     combined_score: float = 0.0  # Combined score for volume and drag optimization
@@ -206,7 +210,8 @@ class FuselageConfiguration:
             "remaining_volume": self.remaining_volume,
             "cd_value": self.cd_value,
             "combined_score": self.combined_score,
-            "vsp_file": self.vsp_file
+            "vsp_file": self.vsp_file,
+            "vsp_file_empty": self.vsp_file_empty
         }
 
 
@@ -283,6 +288,52 @@ def create_perturbed_fuselage(base_length: float, base_width: float, base_height
     return fid
 
 
+def create_fuselage_in_feet(length_feet: float, width_feet: float, height_feet: float) -> str:
+    """
+    Create an empty fuselage geometry in OpenVSP with dimensions in feet.
+    Used for accurate aerodynamic analysis since OpenVSP API works in feet.
+
+    Args:
+        length_feet: Fuselage length in feet
+        width_feet: Fuselage width in feet
+        height_feet: Fuselage height in feet
+
+    Returns:
+        OpenVSP geometry ID of created fuselage
+    """
+    vsp.ClearVSPModel()
+    fid = vsp.AddGeom("FUSELAGE", "")
+    vsp.SetGeomName(fid, "FuselageGeom_Feet")
+
+    # Set fuselage length parameter (already in feet)
+    vsp.SetParmValUpdate(fid, "Length", "Design", length_feet)
+    vsp.Update()
+
+    # Configure cross-sections
+    xsec_surf_id = vsp.GetXSecSurf(fid, 0)
+    num_xsecs = vsp.GetNumXSec(xsec_surf_id)
+
+    for i in range(num_xsecs):
+        if i == 0 or i == num_xsecs - 1:
+            vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_POINT)
+        else:
+            vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_ELLIPSE)
+            xsec_id = vsp.GetXSec(xsec_surf_id, i)
+
+            if i == 1 or i == num_xsecs - 2:
+                scale_factor = 0.3
+            elif i == 2 or i == num_xsecs - 3:
+                scale_factor = 0.7
+            else:
+                scale_factor = 1.0
+
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width_feet * scale_factor)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height_feet * scale_factor)
+
+    vsp.Update()
+    return fid
+
+
 def compute_fuselage_volume_compgeom() -> float:
     """
     Compute fuselage volume using OpenVSP's CompGeom analysis.
@@ -312,9 +363,10 @@ def compute_fuselage_volume_compgeom() -> float:
 # ====================
 # Aerodynamic Analysis Functions
 # ====================
-def run_parasite_drag_analysis(fuse_id: str) -> float:
+def run_parasite_drag_analysis_feet(fuse_id: str) -> float:
     """
-    Run parasite drag analysis by converting the inputs from metric units with IMPERIAL UNITS
+    Run parasite drag analysis on empty fuselage with dimensions in feet.
+    This ensures accurate CD calculation since OpenVSP API operates in feet.
 
     Args:
         fuse_id: OpenVSP geometry ID of the fuselage
@@ -326,10 +378,10 @@ def run_parasite_drag_analysis(fuse_id: str) -> float:
         analysis_name = "ParasiteDrag"
         vsp.SetAnalysisInputDefaults(analysis_name)
 
-        Sref = round(OptConfig.ANALYSIS_SREF * 10.76391041671,2)
-        Vinf = round(OptConfig.ANALYSIS_VINF * 3.28084,2)
-        Altitude = round(OptConfig.ANALYSIS_ALTITUDE * 3.28084,2)
-        DeltaTemp = round(OptConfig.ANALYSIS_DELTA_TEMP * 9/5,2)
+        Sref = round(OptConfig.ANALYSIS_SREF * 10.76391041671, 2)
+        Vinf = round(OptConfig.ANALYSIS_VINF * 3.28084, 2)
+        Altitude = round(OptConfig.ANALYSIS_ALTITUDE * 3.28084, 2)
+        DeltaTemp = round(OptConfig.ANALYSIS_DELTA_TEMP * 9/5, 2)
 
         vsp.SetDoubleAnalysisInput(analysis_name, "Sref", (Sref,))
 
@@ -423,6 +475,7 @@ def run_parasite_drag_analysis(fuse_id: str) -> float:
         print(f"Parasite drag analysis failed: {e}")
         return 1.0
 
+
 def calculate_combined_score(volume: float, cd: float,
                              volume_weight: float = 0.7,
                              cd_weight: float = 0.3) -> float:
@@ -446,55 +499,28 @@ def calculate_combined_score(volume: float, cd: float,
     return volume_weight * volume_norm + cd_weight * cd_norm
 
 
-def debug_gui_comparison(fuse_id: str):
-    """
-    Debug function to compare script results with GUI
-    """
-    print("\n=== DEBUG: GUI Comparison ===")
-
-    # Get geometric properties that might affect CD calculation
-    vsp.ComputeCompGeom(vsp.SET_ALL, False, 0)
-    comp_geom_results = vsp.FindLatestResultsID("Comp_Geom")
-
-    try:
-        # Get various geometric properties
-        ref_areas = vsp.GetDoubleResults(comp_geom_results, "Ref_Area")
-        wetted_areas = vsp.GetDoubleResults(comp_geom_results, "Wet_Area")
-        spans = vsp.GetDoubleResults(comp_geom_results, "Span")
-
-        print(f"Reference Areas: {ref_areas}")
-        print(f"Wetted Areas: {wetted_areas}")
-        print(f"Spans: {spans}")
-
-    except Exception as e:
-        print(f"Debug info failed: {e}")
-
-
 def perform_aerodynamic_analysis(configs: List[FuselageConfiguration]) -> List[FuselageConfiguration]:
     """
     Perform aerodynamic analysis on configurations and filter based on CD threshold.
+    Uses empty fuselage in feet for accurate analysis.
     """
-    print(f"\n7. Performing aerodynamic analysis on {len(configs)} configurations...")
+    print(f"\n5. Performing aerodynamic analysis on {len(configs)} configurations...")
 
     analyzed_configs = []
     successful_analyses = 0
 
     for config in tqdm(configs, desc="Aero analysis", unit="config", ncols=100):
         try:
-            # Recreate fuselage without volumes for clean aerodynamic analysis
-            fuse_id = create_perturbed_fuselage(
-                OptConfig.BASE_LENGTH, OptConfig.BASE_WIDTH, OptConfig.BASE_HEIGHT,
-                (config.length / OptConfig.BASE_LENGTH,
-                 config.width / OptConfig.BASE_WIDTH,
-                 config.height / OptConfig.BASE_HEIGHT)
-            )
+            # Convert dimensions from meters to feet
+            length_feet = config.length * OptConfig.METERS_TO_FEET
+            width_feet = config.width * OptConfig.METERS_TO_FEET
+            height_feet = config.height * OptConfig.METERS_TO_FEET
 
-            # Optional: Run debug comparison for first few configurations
-            if config.config_id <= 3:
-                debug_gui_comparison(fuse_id)
+            # Create empty fuselage in feet
+            fuse_id = create_fuselage_in_feet(length_feet, width_feet, height_feet)
 
             # Run parasite drag analysis
-            cd_value = run_parasite_drag_analysis(fuse_id)
+            cd_value = run_parasite_drag_analysis_feet(fuse_id)
             config.cd_value = cd_value
 
             # Only keep configurations with acceptable drag and valid CD value
@@ -514,6 +540,8 @@ def perform_aerodynamic_analysis(configs: List[FuselageConfiguration]) -> List[F
     print(f"   Configurations passing CD threshold: {len(analyzed_configs)}/{len(configs)}")
 
     return analyzed_configs
+
+
 # ====================
 # Volume Definition with Distance Constraints
 # ====================
@@ -1232,8 +1260,8 @@ def run_optimization():
     top_n_volume = min(OptConfig.TOP_N_VOLUME, len(all_configs))
     top_volume_configs = all_configs[:top_n_volume]
 
-    print(f"\n4. Performing aerodynamic analysis on top {top_n_volume} volume configurations...")
-    # Perform aerodynamic analysis and filter by CD threshold
+    print(f"\n4. Selected top {top_n_volume} configurations by volume for aerodynamic analysis")
+
     aero_configs = perform_aerodynamic_analysis(top_volume_configs)
 
     if not aero_configs:
@@ -1279,10 +1307,22 @@ def run_optimization():
             print(f"   Errors: {validation_errors}")
             continue  # Skip saving invalid configurations
 
-        # Save VSP file with complete geometry
-        vsp_file = os.path.join(conf_dir, f"fuselage_rank_{rank:02d}.vsp3")
+        # Save VSP file with complete geometry (fuselage with volumes)
+        vsp_file = os.path.join(conf_dir, f"fuselage_rank_{rank:02d}_with_volumes.vsp3")
         vsp.WriteVSPFile(vsp_file, vsp.SET_ALL)
         config.vsp_file = vsp_file
+
+        # Save empty fuselage (in feet) for accurate aerodynamic analysis
+        length_feet = config.length * OptConfig.METERS_TO_FEET
+        width_feet = config.width * OptConfig.METERS_TO_FEET
+        height_feet = config.height * OptConfig.METERS_TO_FEET
+
+        fuse_id_empty = create_fuselage_in_feet(length_feet, width_feet, height_feet)
+        vsp.Update()
+
+        vsp_file_empty = os.path.join(conf_dir, f"fuselage_rank_{rank:02d}_empty.vsp3")
+        vsp.WriteVSPFile(vsp_file_empty, vsp.SET_ALL)
+        config.vsp_file_empty = vsp_file_empty
 
         # Save configuration metadata as JSON
         json_file = os.path.join(conf_dir, "config_data.json")
@@ -1300,8 +1340,8 @@ def run_optimization():
     summary_csv = os.path.join(OptConfig.OUTPUT_DIR, "optimization_summary.csv")
     with open(summary_csv, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Rank", "Config_ID", "Length", "Width", "Height",
-                         "Fuselage_Volume", "Boxes_Volume", "Remaining_Volume",
+        writer.writerow(["Rank", "Config_ID", "Length_m", "Width_m", "Height_m",
+                         "Fuselage_Volume_m3", "Boxes_Volume_m3", "Remaining_Volume_m3",
                          "CD_Value", "Combined_Score",
                          "Num_Volumes_Placed", "Num_Volumes_Skipped"])
 
@@ -1319,8 +1359,8 @@ def run_optimization():
     aero_csv = os.path.join(OptConfig.OUTPUT_DIR, "aerodynamic_analysis.csv")
     with open(aero_csv, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Config_ID", "Length", "Width", "Height",
-                         "Fuselage_Volume", "CD_Value", "Combined_Score",
+        writer.writerow(["Config_ID", "Length_m", "Width_m", "Height_m",
+                         "Fuselage_Volume_m3", "CD_Value", "Combined_Score",
                          "Passed_CD_Threshold"])
 
         for config in aero_configs:
@@ -1349,7 +1389,7 @@ def run_optimization():
     for i, config in enumerate(top_configs[:5], 1):
         print(f"{i}. Config {config.config_id}: Combined Score = {config.combined_score:.4f}")
         print(f"   Volume = {config.fuselage_volume:.3f} m³, CD = {config.cd_value:.5f}")
-        print(f"   L={config.length:.2f}, W={config.width:.2f}, H={config.height:.2f}")
+        print(f"   L={config.length:.2f}m, W={config.width:.2f}m, H={config.height:.2f}m")
         print(f"   Volumes: {len(config.volumes_placed)} placed, {config.num_volumes_skipped} skipped")
 
 
@@ -1531,7 +1571,7 @@ def generate_plots(all_configs: List[FuselageConfiguration],
                     label=f'CD threshold ({OptConfig.CD_THRESHOLD})')
         ax5.set_xlabel('Fuselage Volume (m³)')
         ax5.set_ylabel('Drag Coefficient (CD)')
-        ax5.set_title('Volume vs Drag Coefficient')
+        ax5.set_title('Volume vs Drag Coefficient (Empty Fuselage)')
         ax5.legend()
         ax5.grid(True, alpha=0.3)
 
@@ -1546,7 +1586,7 @@ def generate_plots(all_configs: List[FuselageConfiguration],
                         label=f'Top {len(top_configs)} mean')
         ax6.set_xlabel('Drag Coefficient (CD)')
         ax6.set_ylabel('Count')
-        ax6.set_title('Distribution of Drag Coefficients')
+        ax6.set_title('Distribution of Drag Coefficients (Empty Fuselage)')
         ax6.legend()
         ax6.grid(True, alpha=0.3)
 
