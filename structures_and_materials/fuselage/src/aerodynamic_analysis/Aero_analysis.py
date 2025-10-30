@@ -176,27 +176,29 @@ class FuselageBounds:
         return last.radius_y, last.radius_z, last.center_y, last.center_z
 
 
+# Aggiungiamo il campo perturbation_factors alla dataclass FuselageConfiguration
 @dataclass
 class FuselageConfiguration:
     """Complete fuselage configuration with placed volumes and performance metrics"""
-    config_id: int  # Unique configuration identifier
-    length: float  # Fuselage length
-    width: float  # Fuselage width
-    height: float  # Fuselage height
-    fuselage_volume: float = 0.0  # Total fuselage volume from OpenVSP
-    volumes_placed: List[BoxVolume] = field(default_factory=list)  # Successfully placed volumes
-    total_volumes_volume: float = 0.0  # Sum of all placed volumes
-    remaining_volume: float = 0.0  # Unused volume in fuselage
-    num_volumes_skipped: int = 0  # Volumes that couldn't be placed
-    vsp_file: str = ""  # Path to saved VSP file
-    vsp_file_empty: str = ""  # Path to saved empty VSP file (feet-based)
-    bounds: Optional[FuselageBounds] = None  # Geometric bounds for validation
-    cd_value: float = 0.0  # Parasite drag coefficient from aerodynamic analysis
-    combined_score: float = 0.0  # Combined score: OptConfig.CD_WEIGHT*CD + OptConfig.VOLUME_WEIGHT*Volume (normalized)
+    config_id: int
+    length: float
+    width: float
+    height: float
+    fuselage_volume: float = 0.0
+    volumes_placed: List[BoxVolume] = field(default_factory=list)
+    total_volumes_volume: float = 0.0
+    remaining_volume: float = 0.0
+    num_volumes_skipped: int = 0
+    vsp_file: str = ""
+    vsp_file_empty: str = ""
+    bounds: Optional[FuselageBounds] = None
+    cd_value: float = 0.0
+    combined_score: float = 0.0
+    perturbation_factors: Tuple[float, float, float] = field(default_factory=lambda: (1.0, 1.0, 1.0))  # NEW FIELD
 
     def to_dict(self):
         """Convert configuration to dictionary for JSON serialization"""
-        return {
+        data = {
             "config_id": self.config_id,
             "fuselage_params": {
                 "length": self.length,
@@ -212,8 +214,11 @@ class FuselageConfiguration:
             "cd_value": self.cd_value,
             "combined_score": self.combined_score,
             "vsp_file": self.vsp_file,
-            "vsp_file_empty": self.vsp_file_empty
+            "vsp_file_empty": self.vsp_file_empty,
+            "perturbation_factors": list(self.perturbation_factors)  # NEW
         }
+        return data
+
 
 
 # ====================
@@ -1079,10 +1084,10 @@ def generate_perturbation_factors(config: type) -> List[Tuple[float, float, floa
 
 
 def run_optimization():
-    """Main optimization loop - NEW SEQUENCE: CD FIRST, then Volume Analysis."""
+    """Main optimization loop - OPTIMIZED: CD analysis FIRST with feet, then only create meters for top configs."""
     print("=" * 80)
-    print("FUSELAGE VOLUME OPTIMIZATION - CD-FIRST APPROACH")
-    print("Sequence: CD Evaluation → CD Filtering → Volume Analysis → Combined Scoring")
+    print("FUSELAGE VOLUME OPTIMIZATION - OPTIMIZED CD-FIRST APPROACH")
+    print("Sequence: CD Evaluation (feet) → CD Filtering → Volume Analysis (meters only for top configs)")
     print(f"Weights: CD={OptConfig.CD_WEIGHT}, Volume={OptConfig.VOLUME_WEIGHT}")
     print("=" * 80)
 
@@ -1098,77 +1103,104 @@ def run_optimization():
     print(f"   Base volumes defined: {len(base_volumes)}")
     print(f"   Total distance constraints: {sum(len(v.distance_constraints) for v in base_volumes)}")
 
-    # Create all configurations with geometry only (no volumes yet)
-    print(f"\n1b. Creating {OptConfig.NUM_CONFIGURATIONS} fuselage geometries...")
-    all_geom_configs = []
+    # ========== STEP 1: CD ANALYSIS DIRECTLY IN FEET (NO METERS CREATION) ==========
+    print(f"\n2. Performing CD analysis on {len(perturbation_factors)} configurations (directly in feet)...")
+    cd_analyzed_configs = []
 
     for i, (lf, wf, hf) in enumerate(tqdm(perturbation_factors,
-                                          desc="Creating geometries",
+                                          desc="CD analysis in feet",
                                           unit="config",
                                           ncols=100)):
-        # Create fuselage with perturbed dimensions
-        fuse_id = create_perturbed_fuselage(
-            OptConfig.BASE_LENGTH, OptConfig.BASE_WIDTH, OptConfig.BASE_HEIGHT,
-            (lf, wf, hf)
-        )
+        try:
+            # Calculate dimensions in meters for configuration tracking
+            length_m = OptConfig.BASE_LENGTH * lf
+            width_m = OptConfig.BASE_WIDTH * wf
+            height_m = OptConfig.BASE_HEIGHT * hf
 
-        # Create configuration object with geometry only
-        config = FuselageConfiguration(
-            config_id=i + 1,
-            length=OptConfig.BASE_LENGTH * lf,
-            width=OptConfig.BASE_WIDTH * wf,
-            height=OptConfig.BASE_HEIGHT * hf
-        )
+            # Convert to feet for CD analysis
+            length_feet = length_m * OptConfig.METERS_TO_FEET
+            width_feet = width_m * OptConfig.METERS_TO_FEET
+            height_feet = height_m * OptConfig.METERS_TO_FEET
 
-        all_geom_configs.append(config)
+            # Create fuselage directly in feet for CD analysis
+            fuse_id = create_fuselage_in_feet(length_feet, width_feet, height_feet)
 
-    # ========== STEP 1: CD ANALYSIS ON ALL GEOMETRIES (PRIMARY FILTER) ==========
-    cd_analyzed_configs = perform_cd_analysis_on_all_configs(all_geom_configs)
+            # Run parasite drag analysis
+            cd_value = run_parasite_drag_analysis_feet(fuse_id)
+
+            # Create configuration with CD results
+            config = FuselageConfiguration(
+                config_id=i + 1,
+                length=length_m,
+                width=width_m,
+                height=height_m,
+                cd_value=cd_value
+            )
+
+            # Store perturbation factors for later geometry recreation
+            config.perturbation_factors = (lf, wf, hf)
+
+            if cd_value > 0:
+                cd_analyzed_configs.append(config)
+
+        except Exception as e:
+            print(f"Warning: CD analysis failed for config {i + 1}: {e}")
+            continue
+
+    print(f"   Successful CD analyses: {len(cd_analyzed_configs)}/{len(perturbation_factors)}")
 
     # ========== STEP 2: SELECT BEST CD CONFIGURATIONS ==========
     top_cd_configs = select_best_cd_configs(cd_analyzed_configs)
 
-    # ========== STEP 3: VOLUME ANALYSIS ON SELECTED CD CONFIGS ==========
-    print(f"\n4. Computing fuselage volumes for top CD configurations...")
+    if not top_cd_configs:
+        print("No configurations passed CD analysis! Exiting.")
+        return
+
+    # ========== STEP 3: VOLUME ANALYSIS ONLY ON TOP CD CONFIGS ==========
+    print(f"\n4. Performing volume analysis on top {len(top_cd_configs)} CD configurations...")
+    valid_volume_configs = []
+
     for config in tqdm(top_cd_configs, desc="Volume analysis", unit="config", ncols=100):
-        # Create fuselage geometry
-        fuse_id = create_perturbed_fuselage(
-            OptConfig.BASE_LENGTH, OptConfig.BASE_WIDTH, OptConfig.BASE_HEIGHT,
-            (config.length / OptConfig.BASE_LENGTH,
-             config.width / OptConfig.BASE_WIDTH,
-             config.height / OptConfig.BASE_HEIGHT)
-        )
+        try:
+            # ONLY NOW create the fuselage in meters for volume analysis
+            fuse_id = create_perturbed_fuselage(
+                OptConfig.BASE_LENGTH, OptConfig.BASE_WIDTH, OptConfig.BASE_HEIGHT,
+                config.perturbation_factors  # Use stored factors
+            )
 
-        # Analyze fuselage geometry for volume placement
-        bounds = analyze_fuselage_geometry(fuse_id)
-        config.bounds = bounds
+            # Analyze fuselage geometry for volume placement
+            bounds = analyze_fuselage_geometry(fuse_id)
+            config.bounds = bounds
 
-        # Compute fuselage volume using OpenVSP
-        fuse_volume = compute_fuselage_volume_compgeom()
-        config.fuselage_volume = fuse_volume
+            # Compute fuselage volume using OpenVSP
+            fuse_volume = compute_fuselage_volume_compgeom()
+            config.fuselage_volume = fuse_volume
 
-        # Attempt to place all volumes with constraints
-        placed_volumes, num_skipped = place_volumes_in_fuselage(
-            bounds, base_volumes, debug=False
-        )
+            # Attempt to place all volumes with constraints
+            placed_volumes, num_skipped = place_volumes_in_fuselage(
+                bounds, base_volumes, debug=False
+            )
 
-        # Only consider configurations where ALL volumes are successfully placed
-        if num_skipped == 0:
-            # Final validation to ensure configuration integrity
-            is_valid, validation_errors = validate_configuration(placed_volumes, bounds)
+            # Only consider configurations where ALL volumes are successfully placed
+            if num_skipped == 0:
+                # Final validation to ensure configuration integrity
+                is_valid, validation_errors = validate_configuration(placed_volumes, bounds)
 
-            if is_valid:
-                # Calculate volume metrics
-                total_boxes_volume = sum([v.length * v.width * v.height for v in placed_volumes])
+                if is_valid:
+                    # Calculate volume metrics
+                    total_boxes_volume = sum([v.length * v.width * v.height for v in placed_volumes])
 
-                # Update configuration with volume data
-                config.volumes_placed = placed_volumes
-                config.total_volumes_volume = total_boxes_volume
-                config.remaining_volume = fuse_volume - total_boxes_volume
-                config.num_volumes_skipped = num_skipped
+                    # Update configuration with volume data
+                    config.volumes_placed = placed_volumes
+                    config.total_volumes_volume = total_boxes_volume
+                    config.remaining_volume = fuse_volume - total_boxes_volume
+                    config.num_volumes_skipped = num_skipped
 
-    # Filter out configs where volumes couldn't be placed
-    valid_volume_configs = [c for c in top_cd_configs if len(c.volumes_placed) > 0]
+                    valid_volume_configs.append(config)
+
+        except Exception as e:
+            print(f"Warning: Volume analysis failed for config {config.config_id}: {e}")
+            continue
 
     if not valid_volume_configs:
         print("   No configurations passed volume placement validation! Exiting.")
@@ -1177,7 +1209,7 @@ def run_optimization():
     print(f"   Successfully placed volumes in {len(valid_volume_configs)} configurations")
 
     # ========== STEP 4: COMBINED SCORING ==========
-    print(f"\n5. Computing combined scores")
+    print(f"\n5. Computing combined scores...")
     for config in valid_volume_configs:
         config.combined_score = calculate_combined_score(
             config.cd_value,
@@ -1205,17 +1237,14 @@ def run_optimization():
         conf_dir = os.path.join(top_dir, f"rank_{rank:02d}_config_{config.config_id}")
         os.makedirs(conf_dir, exist_ok=True)
 
-        # Recreate fuselage geometry for saving
+        # Recreate fuselage geometry for saving (in meters)
         fuse_id = create_perturbed_fuselage(
             OptConfig.BASE_LENGTH, OptConfig.BASE_WIDTH, OptConfig.BASE_HEIGHT,
-            (config.length / OptConfig.BASE_LENGTH,
-             config.width / OptConfig.BASE_WIDTH,
-             config.height / OptConfig.BASE_HEIGHT)
+            config.perturbation_factors
         )
 
         # Create volumes using previously validated positions
         create_volumes_in_vsp(config.volumes_placed)
-
         vsp.Update()
 
         # Final validation before saving
@@ -1227,12 +1256,12 @@ def run_optimization():
             print(f"   Errors: {validation_errors}")
             continue
 
-        # Save VSP file with complete geometry
+        # Save VSP file with complete geometry (meters)
         vsp_file = os.path.join(conf_dir, f"fuselage_rank_{rank:02d}_with_volumes.vsp3")
         vsp.WriteVSPFile(vsp_file, vsp.SET_ALL)
         config.vsp_file = vsp_file
 
-        # Save empty fuselage (in feet) for reference
+        # Save empty fuselage (in feet) for reference - recreate from stored factors
         length_feet = config.length * OptConfig.METERS_TO_FEET
         width_feet = config.width * OptConfig.METERS_TO_FEET
         height_feet = config.height * OptConfig.METERS_TO_FEET
