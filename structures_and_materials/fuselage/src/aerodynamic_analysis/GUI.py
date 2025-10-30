@@ -1,7 +1,7 @@
 """
 GUI for Fuselage Volume Optimization - REAL-TIME LOG (SUBPROCESS VERSION)
 ==========================================================================
-Con validazione in tempo reale, colori ottimizzati, status dinamico e layout compatto
+With real-time validation, optimized colors, dynamic status, and compact layout.
 """
 
 import tkinter as tk
@@ -25,7 +25,7 @@ except ImportError as e:
 
 
 class OptimizationProcess:
-    """Gestisce l'ottimizzazione usando subprocess per catturare output in tempo reale"""
+    """Handles the optimization process using a subprocess to capture real-time output."""
     def __init__(self):
         self.process = None
         self.is_running = False
@@ -33,7 +33,13 @@ class OptimizationProcess:
         self.reader_thread = None
 
     def start(self, config_dict):
-        """Avvia l'ottimizzazione via subprocess"""
+        """
+        Starts the optimization via subprocess.
+        Args:
+            config_dict: Dictionary containing the configuration parameters.
+        Returns:
+            True if the process started successfully, False otherwise.
+        """
         if self.is_running:
             return False
 
@@ -46,8 +52,8 @@ class OptimizationProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                encoding='utf-8',  # <-- Correzione Encoding
-                errors='replace', # <-- Correzione Encoding
+                encoding='utf-8',  # Encoding correction
+                errors='replace', # Encoding correction
                 bufsize=1,
                 universal_newlines=True
             )
@@ -62,7 +68,7 @@ class OptimizationProcess:
             return False
 
     def stop(self):
-        """Ferma l'ottimizzazione"""
+        """Stops the running optimization process."""
         if self.process:
             try:
                 self.process.terminate()
@@ -74,13 +80,21 @@ class OptimizationProcess:
         return False
 
     def is_alive(self):
-        """Controlla se il processo è ancora in esecuzione"""
+        """
+        Checks if the optimization process is still running.
+        Returns:
+            True if the process is running, False otherwise.
+        """
         if self.process:
             return self.process.poll() is None
         return False
 
     def get_output(self):
-        """Legge i messaggi dalla queue (non-blocking)"""
+        """
+        Reads messages from the output queue in a non-blocking way.
+        Returns:
+            A list of output messages from the queue.
+        """
         messages = []
         try:
             while True:
@@ -91,7 +105,7 @@ class OptimizationProcess:
         return messages
 
     def _read_output(self):
-        """Legge output dal processo in tempo reale"""
+        """Internal method to read output from the process in real-time."""
         try:
             if self.process and self.process.stdout:
                 for line in iter(self.process.stdout.readline, ''):
@@ -101,10 +115,16 @@ class OptimizationProcess:
             self.output_queue.put(f"ERROR reading output: {e}")
 
     def _create_runner_script(self, config_dict):
-        """Crea script Python che esegue l'ottimizzazione"""
+        """
+        Creates the Python script string to be executed by the subprocess.
+        Args:
+            config_dict: The configuration dictionary to pass to the script.
+        Returns:
+            A string containing the Python script.
+        """
         script = f"""
 import sys
-import os # Aggiunto per check file
+import os # Added for file check
 from Aero_analysis import run_optimization, OptConfig, load_volumes_from_file
 
 config_dict = {config_dict}
@@ -121,7 +141,7 @@ except Exception as e:
 
 
 class FuselageOptimizationGUI:
-    # Colori personalizzati
+    # Custom colors
     COLORS = {
         'bg_console': '#1e1e1e',
         'fg_console': '#e8e8e8',
@@ -147,7 +167,7 @@ class FuselageOptimizationGUI:
 
         self.create_gui()
         self.load_default_config()
-        self.update_gui_from_config() # Assicura che i default siano mostrati
+        self.update_gui_from_config() # Ensure defaults are displayed
         self.monitor_process()
 
     def create_gui(self):
@@ -175,21 +195,21 @@ class FuselageOptimizationGUI:
         self.create_advanced_params_tab(params_notebook)
 
     def create_main_params_tab(self, notebook):
-        """Create main parameters tab - compatto (SENZA SCROLLBAR)"""
+        """Create the main parameters tab (compact, no scrollbar)."""
         main_frame = ttk.Frame(notebook)
         notebook.add(main_frame, text="Main Parameters")
 
         title_label = ttk.Label(main_frame, text="Fuselage Parameters", font=('Arial', 12, 'bold'))
-        # Usiamo anchor='n' (north) per centrarlo in alto
+        # Use anchor='n' (north) to center it at the top
         title_label.pack(pady=(5, 10), padx=5, anchor='n')
 
-        # --- Contenitore per i frame dei parametri ---
-        # Usiamo un frame normale, non uno scrollabile
-        # Lo centriamo usando anchor='n'
+        # --- Container for parameter frames ---
+        # Use a normal frame, not a scrollable one
+        # Center it using anchor='n'
         params_container = ttk.Frame(main_frame)
         params_container.pack(fill='x', expand=False, padx=10, pady=5, anchor='n')
 
-        # LENGTH PARAMETERS - Compatto
+        # LENGTH PARAMETERS - Compact
         length_frame = ttk.LabelFrame(params_container, text="Length (L)", padding=5)
         length_frame.pack(fill='x', padx=5, pady=3)
 
@@ -207,11 +227,12 @@ class FuselageOptimizationGUI:
 
         ttk.Label(length_frame, text="Step:").grid(row=2, column=0, sticky='w', padx=2, pady=2)
         self.l_step_var = tk.DoubleVar(value=1.0)
-        self._create_validated_spinbox(length_frame, from_=0.1, textvariable=self.l_step_var, width=10,
-                                       increment=0.1).grid(row=2, column=1, padx=2, pady=2)
+        # Minimum step correction
+        self._create_validated_spinbox(length_frame, from_=0.01, textvariable=self.l_step_var, width=10,
+                                       increment=0.01).grid(row=2, column=1, padx=2, pady=2)
         ttk.Label(length_frame, text="m").grid(row=2, column=2, sticky='w', padx=1)
 
-        # RADIUS PARAMETERS - Compatto
+        # RADIUS PARAMETERS - Compact
         radius_frame = ttk.LabelFrame(params_container, text="Radius (R)", padding=5)
         radius_frame.pack(fill='x', padx=5, pady=3)
 
@@ -229,20 +250,35 @@ class FuselageOptimizationGUI:
 
         ttk.Label(radius_frame, text="Step:").grid(row=2, column=0, sticky='w', padx=2, pady=2)
         self.r_step_var = tk.DoubleVar(value=0.15)
-        self._create_validated_spinbox(radius_frame, from_=0.1, textvariable=self.r_step_var, width=10,
-                                       increment=0.1).grid(row=2, column=1, padx=2, pady=2)
+        # Minimum step correction
+        self._create_validated_spinbox(radius_frame, from_=0.01, textvariable=self.r_step_var, width=10,
+                                       increment=0.01).grid(row=2, column=1, padx=2, pady=2)
         ttk.Label(radius_frame, text="m").grid(row=2, column=2, sticky='w', padx=1)
 
-        # CONFIGURATION SUMMARY - Compatto
+        # CONFIGURATION SUMMARY - Compact
         summary_frame = ttk.LabelFrame(params_container, text="Configuration Summary", padding=5)
         summary_frame.pack(fill='x', padx=5, pady=3)
 
         self.summary_text = tk.StringVar(value="Click Calculate to see configurations")
-        ttk.Label(summary_frame, textvariable=self.summary_text, font=('Arial', 9), foreground='darkblue',
-                  justify='left', wraplength=300).pack(anchor='w', padx=2, pady=2)
+
+        # 1. Remove fixed wraplength and save the widget
+        self.summary_label = ttk.Label(summary_frame, textvariable=self.summary_text, font=('Arial', 9),
+                                       foreground='darkblue', justify='left')
+        self.summary_label.pack(anchor='w', padx=2, pady=2)
+
         ttk.Button(summary_frame, text="Calculate", command=self.calculate_summary, width=15).pack(pady=3)
 
-        # --- SPOSTATO QUI ---
+        # 2. Define the callback function
+        def configure_summary_wrap(event):
+            # Calculate new width. Subtract 20px for padding.
+            new_width = event.width - 20
+            # Apply the new wraplength only if width is positive.
+            if new_width > 0:
+                self.summary_label.config(wraplength=new_width)
+
+        # 3. Bind the <Configure> event to the parent frame
+        summary_frame.bind("<Configure>", configure_summary_wrap)
+
         # VOLUME FILE INPUT
         volume_frame = ttk.LabelFrame(params_container, text="Input Data", padding=5)
         volume_frame.pack(fill='x', padx=5, pady=3)
@@ -257,18 +293,19 @@ class FuselageOptimizationGUI:
         ttk.Button(volume_frame, text="Browse...", command=self.load_volume_file, width=12).grid(row=0, column=2,
                                                                                                  sticky='e', padx=5,
                                                                                                  pady=5)
+        # This line is correct and applies to 'volume_frame'
         volume_frame.grid_columnconfigure(1, weight=1)
 
     def create_advanced_params_tab(self, notebook):
-        """Create advanced parameters tab - compatto (SENZA SCROLLBAR)"""
+        """Create the advanced parameters tab (compact, no scrollbar)."""
         advanced_frame = ttk.Frame(notebook)
         notebook.add(advanced_frame, text="Advanced")
 
         title_label = ttk.Label(advanced_frame, text="Advanced Settings", font=('Arial', 11, 'bold'))
         title_label.pack(pady=(5, 10), padx=5, anchor='n')
 
-        # --- Contenitore per i frame dei parametri ---
-        # Usiamo un frame normale, non uno scrollabile
+        # --- Container for parameter frames ---
+        # Use a normal frame, not a scrollable one
         params_container = ttk.Frame(advanced_frame)
         params_container.pack(fill='x', expand=False, padx=10, pady=5, anchor='n')
 
@@ -350,7 +387,7 @@ class FuselageOptimizationGUI:
         self.results_text.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
 
-        # Tag per colori
+        # Tags for coloring
         self.results_text.tag_configure('info', foreground=self.COLORS['accent_console'])
         self.results_text.tag_configure('success', foreground='#4caf50')
         self.results_text.tag_configure('error', foreground='#f44336')
@@ -374,7 +411,19 @@ class FuselageOptimizationGUI:
         self.run_button.pack(side='right', padx=2)
 
     def _create_validated_spinbox(self, parent, from_, to=None, textvariable=None, width=12, increment=0.1, on_focus_out=None):
-        """Crea uno Spinbox con validazione in tempo reale"""
+        """
+        Creates a Spinbox with real-time validation.
+        Args:
+            parent: The parent widget.
+            from_: The minimum value.
+            to: The maximum value (optional).
+            textvariable: The tk.DoubleVar to link.
+            width: The widget width.
+            increment: The step for spin buttons.
+            on_focus_out: Optional callback for FocusOut event.
+        Returns:
+            A ttk.Spinbox widget.
+        """
         spinbox = ttk.Spinbox(
             parent,
             from_=from_,
@@ -404,7 +453,7 @@ class FuselageOptimizationGUI:
         return spinbox
 
     def update_status(self, status_type):
-        """Aggiorna lo status con il colore appropriato"""
+        """Updates the status label with the appropriate color."""
         color = self.STATUS_COLORS.get(status_type, '#999999')
         self.status_label.configure(foreground=color)
 
@@ -419,7 +468,7 @@ class FuselageOptimizationGUI:
             r_max = self.r_max_var.get()
             r_step = self.r_step_var.get()
 
-            # Validazione dei parametri prima del calcolo
+            # Validate parameters before calculation
             errors = []
 
             if l_min < 0:
@@ -481,7 +530,7 @@ class FuselageOptimizationGUI:
             'vinf': 150.0,
             'altitude': 6096.0,
             'delta_temp': 0.0,
-            'volume_file': '' # <-- Aggiunto
+            'volume_file': '' # Added
         }
 
     def reset_to_defaults(self):
@@ -506,7 +555,7 @@ class FuselageOptimizationGUI:
         self.vinf_var.set(config.get('vinf', 150.0))
         self.altitude_var.set(config.get('altitude', 6096.0))
         self.delta_temp_var.set(config.get('delta_temp', 0.0))
-        self.volume_file_var.set(config.get('volume_file', '')) # <-- Aggiunto
+        self.volume_file_var.set(config.get('volume_file', '')) # Added
 
     def get_current_config(self) -> Dict[str, Any]:
         """Get current configuration from GUI"""
@@ -524,11 +573,17 @@ class FuselageOptimizationGUI:
             'vinf': self.vinf_var.get(),
             'altitude': self.altitude_var.get(),
             'delta_temp': self.delta_temp_var.get(),
-            'volume_file': self.volume_file_var.get() # <-- Aggiunto
+            'volume_file': self.volume_file_var.get() # Added
         }
 
     def validate_parameters(self, show_success_message=True) -> bool:
-        """Validate all input parameters"""
+        """
+        Validate all input parameters.
+        Args:
+            show_success_message: If True, show a popup on successful validation.
+        Returns:
+            True if all parameters are valid, False otherwise.
+        """
         try:
             config = self.get_current_config()
             errors = []
@@ -573,33 +628,32 @@ class FuselageOptimizationGUI:
             if abs(total_weight - 1.0) > 0.001:
                 errors.append(f"CD and Volume weights must sum to 1.0 (current: {total_weight:.3f})")
 
-            # --- VALIDAZIONE FILE ---
+            # --- FILE VALIDATION ---
             if not config['volume_file']:
                 errors.append("Volume definition file is not selected")
             elif not os.path.exists(config['volume_file']):
                 errors.append(f"Volume file not found at: {config['volume_file']}")
-            # --- FINE VALIDAZIONE FILE ---
+            # --- END FILE VALIDATION ---
 
             if errors:
                 error_msg = "Parameter validation failed:\n• " + "\n• ".join(errors)
                 messagebox.showerror("Validation Error", error_msg)
-                self.status_var.set("✗ Validation Failed")  # <-- Correzione Status
+                self.status_var.set("✗ Validation Failed")  # Status correction
                 self.update_status('error')
                 return False
             else:
                 if show_success_message:
                     messagebox.showinfo("Validation Successful", "All parameters are valid!")
-                    self.status_var.set("Ready")  # <-- Correzione Status
+                    self.status_var.set("Ready")  # Status correction
                     self.update_status('ready')
                 return True
 
         except Exception as e:
             messagebox.showerror("Validation Error", f"Error during validation: {str(e)}")
-            self.status_var.set("✗ Validation Error")  # <-- Correzione Status
+            self.status_var.set("✗ Validation Error")  # Status correction
             self.update_status('error')
             return False
 
-    # --- NUOVA FUNZIONE ---
     def load_volume_file(self):
         """Open file dialog to select volume definition file"""
         filename = filedialog.askopenfilename(
@@ -609,7 +663,6 @@ class FuselageOptimizationGUI:
         if filename:
             self.volume_file_var.set(filename)
             self.log_message(f"Volume file selected: {filename}", 'info')
-    # --- FINE NUOVA FUNZIONE ---
 
     def save_configuration(self):
         """Save current configuration to file"""
@@ -645,7 +698,7 @@ class FuselageOptimizationGUI:
     def run_optimization(self):
         """Run the optimization process"""
         if not self.validate_parameters(show_success_message=False):
-            # Lo stato è già impostato da validate_parameters
+            # Status is already set by validate_parameters
             return
 
         if self.optimization_process.is_running:
@@ -712,7 +765,7 @@ class FuselageOptimizationGUI:
                 self.run_button.config(state='normal')
                 self.stop_button.config(state='disabled')
 
-                # Controlla l'output per errori
+                # Check the output for errors
                 log_content = self.results_text.get('1.0', 'end-1c')
                 if "FATAL ERROR" in log_content or "ERROR:" in log_content:
                     self.status_var.set("✗ Failed")
@@ -731,7 +784,12 @@ class FuselageOptimizationGUI:
                 self.root.after(100, self.monitor_process)
 
     def log_message(self, message: str, tag=''):
-        """Add message to results log with optional tag for coloring"""
+        """
+        Add message to results log with optional tag for coloring.
+        Args:
+            message: The string message to add.
+            tag: The style tag (e.g., 'info', 'error') to apply.
+        """
         def _update_log():
             self.results_text.config(state='normal')
             if tag:
@@ -756,7 +814,7 @@ class FuselageOptimizationGUI:
         if filename:
             try:
                 content = self.results_text.get('1.0', 'end-1c')
-                with open(filename, 'w', encoding='utf-8') as f: # Aggiunto encoding
+                with open(filename, 'w', encoding='utf-8') as f: # Added encoding
                     f.write(content)
                 self.log_message(f"Log saved: {filename}", 'success')
                 messagebox.showinfo("Success", "Results log saved!")
@@ -793,9 +851,9 @@ def main():
             from ttkbootstrap import Window
             root = Window(themename="darkly")
         except ImportError:
-            # Fallback a ttk standard se ttkbootstrap non è installato
+            # Fallback to standard ttk if ttkbootstrap is not installed
             style = ttk.Style()
-            style.theme_use('clam') # Un tema moderno di default
+            style.theme_use('clam') # A modern default theme
             pass
 
         app = FuselageOptimizationGUI(root)
