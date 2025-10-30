@@ -941,7 +941,7 @@ def run_optimization():
         print(f"   FATAL ERROR: Volume file not specified or not found.")
         print(f"   Path: {OptConfig.VOLUME_FILE}")
         print("   Aborting optimization.")
-        return  # Esce dall'ottimizzazione
+        return  # Exit optimization
 
     try:
         base_volumes = load_volumes_from_file(OptConfig.VOLUME_FILE)
@@ -1280,32 +1280,6 @@ def load_volumes_from_file(filepath: str) -> List[BoxVolume]:
     except Exception as e:
         print(f"   ERROR: Failed to load volumes from file: {e}")
         raise
-
-def get_manual_volumes() -> List[BoxVolume]:
-    """Define the 10 volumes with their dimensions and distance constraints."""
-    return [
-        BoxVolume(id=1, length=0.40, width=0.40, height=0.40,
-                  distance_constraints=[(2, 0.6), (3, 0.8), (4, 0.6)]),
-        BoxVolume(id=2, length=0.30, width=0.30, height=0.30,
-                  distance_constraints=[(1, 0.6), (3, 0.25), (5, 0.5)]),
-        BoxVolume(id=3, length=0.50, width=0.40, height=0.40,
-                  distance_constraints=[(1, 0.8), (6, 0.4)]),
-        BoxVolume(id=4, length=0.35, width=0.35, height=0.35,
-                  distance_constraints=[(1, 0.6), (5, 0.5), (7, 0.35)]),
-        BoxVolume(id=5, length=0.45, width=0.40, height=0.30,
-                  distance_constraints=[(2, 0.5), (4, 0.5), (8, 0.55)]),
-        BoxVolume(id=6, length=0.30, width=0.30, height=0.30,
-                  distance_constraints=[(3, 0.4), (7, 0.4), (10, 1.0)]),
-        BoxVolume(id=7, length=0.40, width=0.40, height=0.40,
-                  distance_constraints=[(4, 0.35), (6, 0.4), (10, 0.38)]),
-        BoxVolume(id=8, length=0.30, width=0.30, height=0.30,
-                  distance_constraints=[(5, 0.55)]),
-        BoxVolume(id=9, length=0.50, width=0.45, height=0.40,
-                  distance_constraints=[(3, 1.2)]),
-        BoxVolume(id=10, length=0.60, width=0.50, height=0.45,
-                  distance_constraints=[(6, 1.0), (7, 0.38)]),
-    ]
-
 
 def generate_plots(all_cd_configs: List[FuselageConfiguration],
                    top_configs: List[FuselageConfiguration],
