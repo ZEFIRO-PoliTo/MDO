@@ -101,6 +101,8 @@ class OptConfig:
         cls.LENGTH_MIN = config_dict.get('l_min', cls.LENGTH_MIN)
         cls.LENGTH_MAX = config_dict.get('l_max', cls.LENGTH_MAX)
         cls.LENGTH_STEP = config_dict.get('l_step', cls.LENGTH_STEP)
+        cls.TOP_N_CD = int(config_dict.get('top_n_cd', cls.TOP_N_CD))
+        cls.TOP_N_FINAL = int(config_dict.get('top_n_final', cls.TOP_N_FINAL))
 
         # Width and Height are based on radius
         r_min = config_dict.get('r_min', 1.35)
@@ -1118,18 +1120,14 @@ def run_optimization():
     with open(summary_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Rank", "Config_ID", "Length_m", "Width_m", "Height_m",
-                         "Fuselage_Volume_m3", "Boxes_Volume_m3", "Remaining_Volume_m3",
-                         "CD_Value", "Combined_Score",
-                         "Num_Volumes_Placed", "Num_Volumes_Skipped"])
+                         "Fuselage_Volume_m3", "CD_Value", "Combined_Score"])
 
         for rank, config in enumerate(top_configs, 1):
             writer.writerow([
                 rank, config.config_id,
                 f"{config.length:.3f}", f"{config.width:.3f}", f"{config.height:.3f}",
-                f"{config.fuselage_volume:.3f}", f"{config.total_volumes_volume:.3f}",
-                f"{config.remaining_volume:.3f}",
-                f"{config.cd_value:.5f}", f"{config.combined_score:.5f}",
-                len(config.volumes_placed), config.num_volumes_skipped
+                f"{config.fuselage_volume:.3f}",
+                f"{config.cd_value:.5f}", f"{config.combined_score:.5f}"
             ])
 
     # Save aerodynamic analysis results
