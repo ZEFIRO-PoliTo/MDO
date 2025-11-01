@@ -296,7 +296,6 @@ def create_fuselage_from_dimensions(length: float, width: float, height: float) 
 
             # IMPORTANT: Get XSec ID AFTER changing shape
             xsec_id = vsp.GetXSec(xsec_surf_id, i)
-            # Set ellipse dimensions with scaling
             vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width)
             vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height)
 
@@ -910,8 +909,7 @@ def run_optimization():
     all_configs = generate_step_based_configurations()
     print(f"   Total configurations: {len(all_configs)}")
     print(f"   Length range: {OptConfig.LENGTH_MIN}-{OptConfig.LENGTH_MAX}m (step: {OptConfig.LENGTH_STEP}m)")
-    print(f"   Width range: {OptConfig.WIDTH_MIN}-{OptConfig.WIDTH_MAX}m (step: {OptConfig.WIDTH_STEP}m)")
-    print(f"   Height range: {OptConfig.HEIGHT_MIN}-{OptConfig.HEIGHT_MAX}m (step: {OptConfig.HEIGHT_STEP}m)")
+    print(f"   Radius range: {OptConfig.WIDTH_MIN/2}-{OptConfig.WIDTH_MAX/2}m (step: {OptConfig.WIDTH_STEP/2}m)")
 
     # Load volume definitions from file (NO FALLBACK)
     print(f"\n   Loading volume definitions...")
@@ -1374,8 +1372,7 @@ Weights Applied:
 
 Step Parameters:
   • Length: {OptConfig.LENGTH_MIN}-{OptConfig.LENGTH_MAX}m (step {OptConfig.LENGTH_STEP}m)
-  • Width: {OptConfig.WIDTH_MIN}-{OptConfig.WIDTH_MAX}m (step {OptConfig.WIDTH_STEP}m)
-  • Height: {OptConfig.HEIGHT_MIN}-{OptConfig.HEIGHT_MAX}m (step {OptConfig.HEIGHT_STEP}m)
+  • Radius: {OptConfig.WIDTH_MIN/2}-{OptConfig.WIDTH_MAX/2}m (step {OptConfig.WIDTH_STEP/2}m)
     """
 
     ax6.text(0.05, 0.95, summary_text, transform=ax6.transAxes,
