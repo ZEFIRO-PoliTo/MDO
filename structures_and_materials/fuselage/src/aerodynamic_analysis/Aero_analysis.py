@@ -296,18 +296,9 @@ def create_fuselage_from_dimensions(length: float, width: float, height: float) 
 
             # IMPORTANT: Get XSec ID AFTER changing shape
             xsec_id = vsp.GetXSec(xsec_surf_id, i)
-
-            # Apply scaling factors to create tapered fuselage shape
-            if i == 1 or i == num_xsecs - 2:
-                scale_factor = 0.3
-            elif i == 2 or i == num_xsecs - 3:
-                scale_factor = 0.7
-            else:
-                scale_factor = 1.0
-
             # Set ellipse dimensions with scaling
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width * scale_factor)
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height * scale_factor)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height)
 
     vsp.Update()
     return fid
@@ -342,16 +333,8 @@ def create_fuselage_in_feet(length_feet: float, width_feet: float, height_feet: 
         else:
             vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_ELLIPSE)
             xsec_id = vsp.GetXSec(xsec_surf_id, i)
-
-            if i == 1 or i == num_xsecs - 2:
-                scale_factor = 0.3
-            elif i == 2 or i == num_xsecs - 3:
-                scale_factor = 0.7
-            else:
-                scale_factor = 1.0
-
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width_feet * scale_factor)
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height_feet * scale_factor)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width_feet)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height_feet)
 
     vsp.Update()
     return fid
@@ -874,6 +857,7 @@ def generate_step_based_configurations() -> List[FuselageConfiguration]:
     """
     Generate all fuselage configurations based on step parameters.
     Returns a list of all combinations within the specified ranges.
+    Total configurations = Length_values × Width_values
     """
     configs = []
     config_id = 1
@@ -881,37 +865,29 @@ def generate_step_based_configurations() -> List[FuselageConfiguration]:
     # Generate all length values
     lengths = []
     current = OptConfig.LENGTH_MIN
-    while current <= OptConfig.LENGTH_MAX + 1e-6:  # Small epsilon for floating point
+
+    while current <= OptConfig.LENGTH_MAX + 1e-6:
         lengths.append(current)
         current += OptConfig.LENGTH_STEP
 
-    # Generate all width values
+    # Generate all width values (WIDTH = HEIGHT always)
     widths = []
     current = OptConfig.WIDTH_MIN
     while current <= OptConfig.WIDTH_MAX + 1e-6:
         widths.append(current)
         current += OptConfig.WIDTH_STEP
-
-    # Generate all height values
-    heights = []
-    current = OptConfig.HEIGHT_MIN
-    while current <= OptConfig.HEIGHT_MAX + 1e-6:
-        heights.append(current)
-        current += OptConfig.HEIGHT_STEP
-
-    # Create all combinations
+    # Create combinations: L × W
     for length in lengths:
         for width in widths:
-            for height in heights:
-                config = FuselageConfiguration(
-                    config_id=config_id,
-                    length=round(length, 6),
-                    width=round(width, 6),
-                    height=round(height, 6)
-                )
-                configs.append(config)
-                config_id += 1
-
+            height = width  # HEIGHT = WIDTH
+            config = FuselageConfiguration(
+                config_id=config_id,
+                length=round(length, 6),
+                width=round(width, 6),
+                height=round(height, 6)
+            )
+            configs.append(config)
+            config_id += 1
     return configs
 
 
