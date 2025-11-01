@@ -442,9 +442,6 @@ class FuselageOptimizationGUI:
             summary = f"""Configuration Summary:
             • Length values: {l_count} ({self.l_min_var.get()}m to {self.l_max_var.get()}m, step {self.l_step_var.get()}m)
             • Radius values: {r_count} ({self.r_min_var.get()}m to {self.r_max_var.get()}m, step {self.r_step_var.get()}m)
-            • Width values: {r_count} (derived from radius)
-            • Height values: {r_count} (derived from radius)
-
             TOTAL CONFIGURATIONS: {total}"""
 
             self.summary_text.set(summary)
@@ -473,14 +470,12 @@ class FuselageOptimizationGUI:
             r_count = int(round((r_max - r_min) / r_step)) + 1
 
             # Total = L * W * H, where W and H depend on R
-            total = l_count * r_count * r_count
+            total = l_count * r_count
             return total, True
 
         except Exception:
             # Catches tk.TclError if fields are empty/invalid
             return 0, False
-
-    # --- Method set_top_n_cd_to_max REMOVED ---
 
     def load_default_config(self):
         """Load default configuration values"""
@@ -559,6 +554,7 @@ class FuselageOptimizationGUI:
 
             # Get total config count for validation
             total_configs, is_range_valid = self._get_total_config_count()
+            epsilon = 1e-9
 
             if config['l_min'] < 0:
                 errors.append("Minimum length cannot be negative")
@@ -568,7 +564,7 @@ class FuselageOptimizationGUI:
                 errors.append("Maximum length must be greater than or equal to minimum length")
             if config['l_step'] <= 0:
                 errors.append("Length step must be positive")
-            if (config['l_max'] - config['l_min']) > 0 and config['l_step'] > (config['l_max'] - config['l_min']):
+            if (config['l_max'] - config['l_min']) > 0 and config['l_step'] > (config['l_max'] - config['l_min']) + epsilon:
                 errors.append("Length step must be smaller than the range")
 
             if config['r_min'] < 0:
@@ -579,7 +575,7 @@ class FuselageOptimizationGUI:
                 errors.append("Maximum radius must be greater than or equal to minimum radius")
             if config['r_step'] <= 0:
                 errors.append("Radius step must be positive")
-            if (config['r_max'] - config['r_min']) > 0 and config['r_step'] > (config['r_max'] - config['r_min']):
+            if (config['r_max'] - config['r_min']) > 0 and config['r_step'] > (config['r_max'] - config['r_min']) + epsilon:
                 errors.append("Radius step must be smaller than the range")
 
             if config['sref'] < 0:
