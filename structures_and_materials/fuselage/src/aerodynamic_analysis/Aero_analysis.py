@@ -1,33 +1,38 @@
 """
-Fuselage Volume Optimization Script with Aerodynamic Analysis
-=============================================================
-This script generates multiple fuselage configurations with slightly perturbed
-parameters, places volumes inside each with precise collision detection and
-distance constraints, computes their total volume, selects the top configurations
-with minimum fuselage volume, and performs aerodynamic analysis to find the
-best designs combining compact volume and aerodynamic efficiency.
+Fuselage Volume Optimization Script with Aerodynamic Analysis (STEP-BASED APPROACH)
+=================================================================================
+This script generates multiple fuselage configurations using step-based parameters,
+evaluates their aerodynamic performance (Cd) first, then selects
+the best performing configurations for volume analysis.
 
 Key Features:
+- Step-based geometric variation (replaces perturbation factors)
 - Precise geometric validation using multiple surface points
 - Multi-level validation to ensure consistency
 - Distance constraints between volumes
 - Collision detection with safety margins
 - Automated VSP file generation and analysis
 - Aerodynamic parasite drag analysis
-- Combined volume and drag optimization
+- Combined CD and volume optimization
 """
-
 import openvsp as vsp
 import numpy as np
 import os
 import json
 import csv
 import math
+import sys
+import io
 from typing import List, Tuple, Optional
 from dataclasses import dataclass, asdict, field
 import matplotlib.pyplot as plt
 from datetime import datetime
 from tqdm import tqdm
+
+# Fix encoding for Windows (tqdm character compatibility)
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 # ====================
@@ -42,18 +47,20 @@ class OptConfig:
     TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
     OUTPUT_DIR = os.path.join(OUTPUT_BASE, f"run_{TIMESTAMP}")
 
-    # Base fuselage parameters (nominal design)
-    BASE_LENGTH = 20.0  # meters
-    BASE_WIDTH = 3.0  # meters
-    BASE_HEIGHT = 3.0  # meters
+    # Length parameters (STEP-BASED)
+    LENGTH_MIN = 18.0  # meters
+    LENGTH_MAX = 22.0  # meters
+    LENGTH_STEP = 1.0  # meters
 
-    # Perturbation parameters (percentage of base values)
-    LENGTH_PERTURBATION = 0.1  # ±10% of base length
-    WIDTH_PERTURBATION = 0.1  # ±10% of base width
-    HEIGHT_PERTURBATION = 0.1  # ±10% of base height
+    # Width parameters (STEP-BASED)
+    WIDTH_MIN = 2.7  # meters (minimum radius * 2)
+    WIDTH_MAX = 3.3  # meters (maximum radius * 2)
+    WIDTH_STEP = 0.2  # meters
 
-    # Number of configurations to generate
-    NUM_CONFIGURATIONS = 20  # Increased for better sampling
+    # Height parameters (STEP-BASED)
+    HEIGHT_MIN = 2.7  # meters (minimum radius * 2)
+    HEIGHT_MAX = 3.3  # meters (maximum radius * 2)
+    HEIGHT_STEP = 0.2  # meters
 
     # Volume placement parameters
     NUM_VOLUMES = 10
@@ -65,9 +72,9 @@ class OptConfig:
     U_SAMPLES = 80  # Number of longitudinal samples along fuselage
     W_SAMPLES = 32  # Number of circumferential samples around fuselage
 
-    # Top N configurations to keep after volume optimization
-    TOP_N_VOLUME = 10  # Select top 100 by volume for aerodynamic analysis
-    TOP_N_FINAL = 5  # Final top 10 after aerodynamic analysis
+    # Top N configurations to keep after CD optimization
+    TOP_N_CD = 10  # Select top by CD for volume analysis
+    TOP_N_FINAL = 5  # Final top after combined optimization
 
     # Maximum attempts to place each volume before skipping
     MAX_PLACEMENT_ATTEMPTS = 1000
@@ -79,9 +86,45 @@ class OptConfig:
     ANALYSIS_ALTITUDE = 6096.0  # m
     ANALYSIS_DELTA_TEMP = 0.0  # K
 
+    # Combined scoring weights
+    CD_WEIGHT = 0.7  # Primary weight for drag coefficient
+    VOLUME_WEIGHT = 0.3  # Secondary weight for fuselage volume
+
+    VOLUME_FILE: Optional[str] = None
+
     # Conversion factor: meters to feet
     METERS_TO_FEET = 3.28084
 
+    @classmethod
+    def update_from_gui(cls, config_dict):
+        """Update configuration from GUI parameters"""
+        cls.LENGTH_MIN = config_dict.get('l_min', cls.LENGTH_MIN)
+        cls.LENGTH_MAX = config_dict.get('l_max', cls.LENGTH_MAX)
+        cls.LENGTH_STEP = config_dict.get('l_step', cls.LENGTH_STEP)
+        cls.TOP_N_CD = int(config_dict.get('top_n_cd', cls.TOP_N_CD))
+        cls.TOP_N_FINAL = int(config_dict.get('top_n_final', cls.TOP_N_FINAL))
+
+        # Width and Height are based on radius
+        r_min = config_dict.get('r_min', 1.35)
+        r_max = config_dict.get('r_max', 1.65)
+        r_step = config_dict.get('r_step', 0.15)
+
+        cls.WIDTH_MIN = r_min * 2
+        cls.WIDTH_MAX = r_max * 2
+        cls.WIDTH_STEP = r_step * 2
+
+        cls.HEIGHT_MIN = r_min * 2
+        cls.HEIGHT_MAX = r_max * 2
+        cls.HEIGHT_STEP = r_step * 2
+
+        cls.SAFETY_MARGIN = config_dict.get('safety_margin', cls.SAFETY_MARGIN)
+        cls.CD_WEIGHT = config_dict.get('cd_weight', cls.CD_WEIGHT)
+        cls.VOLUME_WEIGHT = config_dict.get('volume_weight', cls.VOLUME_WEIGHT)
+        cls.ANALYSIS_SREF = config_dict.get('sref', cls.ANALYSIS_SREF)
+        cls.ANALYSIS_VINF = config_dict.get('vinf', cls.ANALYSIS_VINF)
+        cls.ANALYSIS_ALTITUDE = config_dict.get('altitude', cls.ANALYSIS_ALTITUDE)
+        cls.ANALYSIS_DELTA_TEMP = config_dict.get('delta_temp', cls.ANALYSIS_DELTA_TEMP)
+        cls.VOLUME_FILE = config_dict.get('volume_file', cls.VOLUME_FILE)
 
 # ====================
 # Data Classes
@@ -178,24 +221,24 @@ class FuselageBounds:
 @dataclass
 class FuselageConfiguration:
     """Complete fuselage configuration with placed volumes and performance metrics"""
-    config_id: int  # Unique configuration identifier
-    length: float  # Fuselage length
-    width: float  # Fuselage width
-    height: float  # Fuselage height
-    fuselage_volume: float  # Total fuselage volume from OpenVSP
-    volumes_placed: List[BoxVolume]  # Successfully placed volumes
-    total_volumes_volume: float  # Sum of all placed volumes
-    remaining_volume: float  # Unused volume in fuselage
-    num_volumes_skipped: int = 0  # Volumes that couldn't be placed
-    vsp_file: str = ""  # Path to saved VSP file
-    vsp_file_empty: str = ""  # Path to saved empty VSP file (feet-based)
-    bounds: Optional[FuselageBounds] = None  # Geometric bounds for validation
-    cd_value: float = 0.0  # Parasite drag coefficient from aerodynamic analysis
-    combined_score: float = 0.0  # Combined score for volume and drag optimization
+    config_id: int
+    length: float
+    width: float
+    height: float
+    fuselage_volume: float = 0.0
+    volumes_placed: List[BoxVolume] = field(default_factory=list)
+    total_volumes_volume: float = 0.0
+    remaining_volume: float = 0.0
+    num_volumes_skipped: int = 0
+    vsp_file: str = ""
+    vsp_file_empty: str = ""
+    bounds: Optional[FuselageBounds] = None
+    cd_value: float = 0.0
+    combined_score: float = 0.0
 
     def to_dict(self):
         """Convert configuration to dictionary for JSON serialization"""
-        return {
+        data = {
             "config_id": self.config_id,
             "fuselage_params": {
                 "length": self.length,
@@ -213,30 +256,22 @@ class FuselageConfiguration:
             "vsp_file": self.vsp_file,
             "vsp_file_empty": self.vsp_file_empty
         }
+        return data
 
 
 # ====================
 # Fuselage Creation Functions
 # ====================
-def create_perturbed_fuselage(base_length: float, base_width: float, base_height: float,
-                              perturbation_factors: Tuple[float, float, float]) -> str:
+def create_fuselage_from_dimensions(length: float, width: float, height: float) -> str:
     """
-    Create a fuselage geometry in OpenVSP with perturbed dimensions and closed nose/tail.
-
+    Create a fuselage geometry in OpenVSP with specified dimensions and closed nose/tail.
     Args:
-        base_length: Nominal fuselage length
-        base_width: Nominal fuselage width
-        base_height: Nominal fuselage height
-        perturbation_factors: Tuple of (length_factor, width_factor, height_factor)
-
+        length: Fuselage length in meters
+        width: Fuselage width in meters
+        height: Fuselage height in meters
     Returns:
         OpenVSP geometry ID of created fuselage
     """
-    # Apply perturbations to base dimensions
-    length = base_length * perturbation_factors[0]
-    width = base_width * perturbation_factors[1]
-    height = base_height * perturbation_factors[2]
-
     # Clear existing model and create new fuselage
     vsp.ClearVSPModel()
     fid = vsp.AddGeom("FUSELAGE", "")
@@ -255,34 +290,14 @@ def create_perturbed_fuselage(base_length: float, base_width: float, base_height
         if i == 0 or i == num_xsecs - 1:
             # Set to POINT type for nose/tail closure
             vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_POINT)
-            # Point sections don't need width/height settings
         else:
             # Set intermediate cross-sections to ellipse
             vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_ELLIPSE)
 
             # IMPORTANT: Get XSec ID AFTER changing shape
             xsec_id = vsp.GetXSec(xsec_surf_id, i)
-
-            # Apply scaling factors to create tapered fuselage shape
-            # Gradually transition from small to full scale
-            if i == 1 or i == num_xsecs - 2:
-                # Transition regions near nose/tail
-                scale_factor = 0.3
-            elif i == 2 or i == num_xsecs - 3:
-                # Near transition regions
-                scale_factor = 0.7
-            else:
-                # Central region: full scale with controlled variation
-                # Add subtle shape variation based on perturbation length factor
-                # This creates "fatter" or "thinner" fuselages in the middle
-                shape_modifier = 0.85 + (perturbation_factors[0] - 1.0) * 0.3
-                shape_modifier = max(0.7, min(1.3, shape_modifier))  # Clamp to safe range
-                scale_factor = 1.0 * shape_modifier
-
-            # Set ellipse dimensions with scaling
-            # Use consistent width/height ratio for coherent shape
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width * scale_factor)
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height * scale_factor)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height)
 
     vsp.Update()
     return fid
@@ -290,14 +305,12 @@ def create_perturbed_fuselage(base_length: float, base_width: float, base_height
 
 def create_fuselage_in_feet(length_feet: float, width_feet: float, height_feet: float) -> str:
     """
-    Create an empty fuselage geometry in OpenVSP with dimensions in feet.
+    Create a fuselage geometry in OpenVSP with dimensions in feet.
     Used for accurate aerodynamic analysis since OpenVSP API works in feet.
-
     Args:
         length_feet: Fuselage length in feet
         width_feet: Fuselage width in feet
         height_feet: Fuselage height in feet
-
     Returns:
         OpenVSP geometry ID of created fuselage
     """
@@ -319,16 +332,8 @@ def create_fuselage_in_feet(length_feet: float, width_feet: float, height_feet: 
         else:
             vsp.ChangeXSecShape(xsec_surf_id, i, vsp.XS_ELLIPSE)
             xsec_id = vsp.GetXSec(xsec_surf_id, i)
-
-            if i == 1 or i == num_xsecs - 2:
-                scale_factor = 0.3
-            elif i == 2 or i == num_xsecs - 3:
-                scale_factor = 0.7
-            else:
-                scale_factor = 1.0
-
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width_feet * scale_factor)
-            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height_feet * scale_factor)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Width"), width_feet)
+            vsp.SetParmVal(vsp.GetXSecParm(xsec_id, "Ellipse_Height"), height_feet)
 
     vsp.Update()
     return fid
@@ -337,7 +342,6 @@ def create_fuselage_in_feet(length_feet: float, width_feet: float, height_feet: 
 def compute_fuselage_volume_compgeom() -> float:
     """
     Compute fuselage volume using OpenVSP's CompGeom analysis.
-
     Returns:
         Fuselage volume in cubic meters, or 0.0 if computation fails
     """
@@ -367,10 +371,8 @@ def run_parasite_drag_analysis_feet(fuse_id: str) -> float:
     """
     Run parasite drag analysis on empty fuselage with dimensions in feet.
     This ensures accurate CD calculation since OpenVSP API operates in feet.
-
     Args:
         fuse_id: OpenVSP geometry ID of the fuselage
-
     Returns:
         CD value (dimensionless, independent of units)
     """
@@ -384,14 +386,8 @@ def run_parasite_drag_analysis_feet(fuse_id: str) -> float:
         DeltaTemp = round(OptConfig.ANALYSIS_DELTA_TEMP * 9/5, 2)
 
         vsp.SetDoubleAnalysisInput(analysis_name, "Sref", (Sref,))
-
-        # Vinf in m/s
         vsp.SetDoubleAnalysisInput(analysis_name, "Vinf", (Vinf,))
-
-        # Altitude in meters
         vsp.SetDoubleAnalysisInput(analysis_name, "Altitude", (Altitude,))
-
-        # Temperature delta in Kelvin
         vsp.SetDoubleAnalysisInput(analysis_name, "DeltaTemp", (DeltaTemp,))
 
         # Use Mach-based calculation
@@ -410,61 +406,12 @@ def run_parasite_drag_analysis_feet(fuse_id: str) -> float:
             print("Warning: No results from ParasiteDrag analysis")
             return 1.0
 
-        # Verify parameters and geometry inclusion
-        print("\n=== ANALYSIS VERIFICATION (IMPERIAL UNITS) ===")
-
-        # Check flight conditions
-        fc_params = ['FC_Sref', 'FC_Vinf', 'FC_Alt', 'FC_Mach']
-        for param in fc_params:
-            try:
-                values = vsp.GetDoubleResults(results_id, param)
-                if values:
-                    print(f"  {param}: {values[0]}")
-            except:
-                pass
-
-        # Check if geometry was included
-        try:
-            comp_labels = vsp.GetStringResults(results_id, "Comp_Label")
-            comp_ids = vsp.GetStringResults(results_id, "Comp_ID")
-
-            if comp_labels:
-                print(f"\nComponents included in analysis ({len(comp_labels)}):")
-                fuselage_included = False
-                for label, comp_id in zip(comp_labels, comp_ids):
-                    print(f"  - {label} (ID: {comp_id})")
-                    if "fuselage" in label.lower():
-                        fuselage_included = True
-
-                if not fuselage_included:
-                    print("⚠ WARNING: Fuselage not found in included components!")
-                else:
-                    print("✓ Fuselage successfully included in analysis")
-            else:
-                print("⚠ No components found in analysis results!")
-
-        except Exception as e:
-            print(f"Error checking components: {e}")
-
         # Get CD value
         cd_value = None
         try:
             total_cd_values = vsp.GetDoubleResults(results_id, "Total_CD_Total")
             if total_cd_values and len(total_cd_values) > 0:
                 cd_value = total_cd_values[0]
-                print(f"\n✓ Calculated CD: {cd_value:.5f}")
-
-                # Show component breakdown for debugging
-                try:
-                    comp_cd = vsp.GetDoubleResults(results_id, "Comp_CD")
-                    comp_labels = vsp.GetStringResults(results_id, "Comp_Label")
-                    if comp_cd and comp_labels:
-                        print("Component CD breakdown:")
-                        for label, cd in zip(comp_labels, comp_cd):
-                            if cd > 0:
-                                print(f"  - {label}: {cd:.5f}")
-                except:
-                    pass
 
         except Exception as e:
             print(f"Error getting CD value: {e}")
@@ -476,104 +423,35 @@ def run_parasite_drag_analysis_feet(fuse_id: str) -> float:
         return 1.0
 
 
-def calculate_combined_score(volume: float, cd: float,
-                             volume_weight: float = 0.7,
-                             cd_weight: float = 0.3) -> float:
+def calculate_combined_score(cd: float, volume: float,
+                             length: float, width: float, height: float,
+                             cd_weight: float = OptConfig.CD_WEIGHT,
+                             volume_weight: float = OptConfig.VOLUME_WEIGHT) -> float:
     """
-    Calculate combined score for volume and drag optimization.
+    Calculate combined score with CD as primary metric (weight 0.7) and volume secondary (weight 0.3).
 
     Args:
-        volume: Fuselage volume (to minimize)
         cd: Drag coefficient (to minimize)
-        volume_weight: Weight for volume in combined score
-        cd_weight: Weight for drag in combined score
-
+        volume: Fuselage volume in m³ (to minimize)
+        length: Actual fuselage length
+        width: Actual fuselage width
+        height: Actual fuselage height
+        cd_weight: Weight for CD (default 0.7)
+        volume_weight: Weight for volume (default 0.3)
     Returns:
         Combined score (lower is better)
     """
-    # Simple normalization - in practice you might want more sophisticated normalization
-    # based on the range of values in your dataset
-    volume_norm = volume / (OptConfig.BASE_LENGTH * OptConfig.BASE_WIDTH * OptConfig.BASE_HEIGHT)
-    cd_norm = cd / OptConfig.CD_THRESHOLD
+    # Use actual dimensions to compute theoretical volume
+    theoretical_volume = length * width * height
+    volume_normalized = volume / theoretical_volume
 
-    return volume_weight * volume_norm + cd_weight * cd_norm
+    # Normalize CD
+    cd_normalized = cd / OptConfig.CD_THRESHOLD
 
+    # Combined score prioritizes CD
+    combined = (cd_weight * cd_normalized) + (volume_weight * volume_normalized)
 
-def perform_aerodynamic_analysis(configs: List[FuselageConfiguration]) -> List[FuselageConfiguration]:
-    """
-    Perform aerodynamic analysis on configurations and filter based on CD threshold.
-    Uses empty fuselage in feet for accurate analysis.
-    """
-    print(f"\n5. Performing aerodynamic analysis on {len(configs)} configurations...")
-
-    analyzed_configs = []
-    successful_analyses = 0
-
-    for config in tqdm(configs, desc="Aero analysis", unit="config", ncols=100):
-        try:
-            # Convert dimensions from meters to feet
-            length_feet = config.length * OptConfig.METERS_TO_FEET
-            width_feet = config.width * OptConfig.METERS_TO_FEET
-            height_feet = config.height * OptConfig.METERS_TO_FEET
-
-            # Create empty fuselage in feet
-            fuse_id = create_fuselage_in_feet(length_feet, width_feet, height_feet)
-
-            # Run parasite drag analysis
-            cd_value = run_parasite_drag_analysis_feet(fuse_id)
-            config.cd_value = cd_value
-
-            # Only keep configurations with acceptable drag and valid CD value
-            if cd_value <= OptConfig.CD_THRESHOLD and cd_value > 0:
-                # Calculate combined score
-                config.combined_score = calculate_combined_score(
-                    config.fuselage_volume, cd_value
-                )
-                analyzed_configs.append(config)
-                successful_analyses += 1
-
-        except Exception as e:
-            print(f"Warning: Aero analysis failed for config {config.config_id}: {e}")
-            continue
-
-    print(f"   Successful analyses: {successful_analyses}/{len(configs)}")
-    print(f"   Configurations passing CD threshold: {len(analyzed_configs)}/{len(configs)}")
-
-    return analyzed_configs
-
-
-# ====================
-# Volume Definition with Distance Constraints
-# ====================
-def get_manual_volumes() -> List[BoxVolume]:
-    """
-    Define the 10 volumes with their dimensions and distance constraints.
-
-    Returns:
-        List of BoxVolume objects with pre-defined constraints between specific volumes
-    """
-    return [
-        BoxVolume(id=1, length=0.40, width=0.40, height=0.40,
-                  distance_constraints=[(2, 0.6), (3, 0.8), (4, 0.6)]),
-        BoxVolume(id=2, length=0.30, width=0.30, height=0.30,
-                  distance_constraints=[(1, 0.6), (3, 0.25), (5, 0.5)]),
-        BoxVolume(id=3, length=0.50, width=0.40, height=0.40,
-                  distance_constraints=[(1, 0.8), (6, 0.4)]),
-        BoxVolume(id=4, length=0.35, width=0.35, height=0.35,
-                  distance_constraints=[(1, 0.6), (5, 0.5), (7, 0.35)]),
-        BoxVolume(id=5, length=0.45, width=0.40, height=0.30,
-                  distance_constraints=[(2, 0.5), (4, 0.5), (8, 0.55)]),
-        BoxVolume(id=6, length=0.30, width=0.30, height=0.30,
-                  distance_constraints=[(3, 0.4), (7, 0.4), (10, 1.0)]),
-        BoxVolume(id=7, length=0.40, width=0.40, height=0.40,
-                  distance_constraints=[(4, 0.35), (6, 0.4), (10, 0.38)]),
-        BoxVolume(id=8, length=0.30, width=0.30, height=0.30,
-                  distance_constraints=[(5, 0.55)]),
-        BoxVolume(id=9, length=0.50, width=0.45, height=0.40,
-                  distance_constraints=[(3, 1.2)]),
-        BoxVolume(id=10, length=0.60, width=0.50, height=0.45,
-                  distance_constraints=[(6, 1.0), (7, 0.38)]),
-    ]
+    return combined
 
 
 # ====================
@@ -582,10 +460,8 @@ def get_manual_volumes() -> List[BoxVolume]:
 def analyze_fuselage_geometry(fuse_id: str) -> FuselageBounds:
     """
     Analyze fuselage geometry by sampling surface points and extracting cross-sections.
-
     Args:
         fuse_id: OpenVSP geometry ID of the fuselage
-
     Returns:
         FuselageBounds object with complete geometric information
     """
@@ -659,11 +535,9 @@ def analyze_fuselage_geometry(fuse_id: str) -> FuselageBounds:
 def x_to_u(x: float, bounds: FuselageBounds) -> float:
     """
     Convert X coordinate to normalized U parameter (0-1) along fuselage length.
-
     Args:
         x: X coordinate in meters
         bounds: Fuselage bounds information
-
     Returns:
         U parameter between 0 and 1
     """
@@ -673,19 +547,11 @@ def x_to_u(x: float, bounds: FuselageBounds) -> float:
 
 
 # ====================
-# PRECISE Collision Detection and Constraint Validation
+# Collision Detection and Constraint Validation
 # ====================
 def generate_box_surface_points(volume: BoxVolume, points_per_edge: int = 3) -> List[Tuple[float, float, float]]:
     """
     Generate multiple test points on the surface of a box volume.
-    Includes vertices, edge centers, and face centers for comprehensive coverage.
-
-    Args:
-        volume: Box volume to generate points for
-        points_per_edge: Number of points to generate along each edge
-
-    Returns:
-        List of (x, y, z) coordinates for test points
     """
     points = []
 
@@ -704,23 +570,19 @@ def generate_box_surface_points(volume: BoxVolume, points_per_edge: int = 3) -> 
                     volume.z + dz
                 ))
 
-    # Add 12 edge midpoints
-    # X-axis edges (constant X, varying Y and Z)
+    # Add 12 edge midpoints and face centers
     for dy in [-volume.half_width, volume.half_width]:
         for dz in [-volume.half_height, volume.half_height]:
             points.append((volume.x, volume.y + dy, volume.z + dz))
 
-    # Y-axis edges (constant Y, varying X and Z)
     for dx in [-volume.half_length, volume.half_length]:
         for dz in [-volume.half_height, volume.half_height]:
             points.append((volume.x + dx, volume.y, volume.z + dz))
 
-    # Z-axis edges (constant Z, varying X and Y)
     for dx in [-volume.half_length, volume.half_length]:
         for dy in [-volume.half_width, volume.half_width]:
             points.append((volume.x + dx, volume.y + dy, volume.z))
 
-    # Add additional points along edges for better coverage (excluding endpoints)
     if points_per_edge > 2:
         for axis in ['x', 'y', 'z']:
             if axis == 'x':
@@ -742,26 +604,13 @@ def generate_box_surface_points(volume: BoxVolume, points_per_edge: int = 3) -> 
 def find_surface_distance_at_angle(cross_section: CrossSection, angle: float) -> Optional[float]:
     """
     Calculate distance from fuselage center to surface at a specific angle.
-    Uses elliptical approximation based on cross-section radii.
-
-    Args:
-        cross_section: Cross-sectional data
-        angle: Angle in radians from positive Y axis
-
-    Returns:
-        Distance from center to surface, or None if calculation fails
     """
-    # For an ellipse, the distance from center to surface at angle theta is:
-    # r = (a * b) / sqrt((b*cos(theta))^2 + (a*sin(theta))^2)
-    # where a = radius_y, b = radius_z
-
     a = cross_section.radius_y
     b = cross_section.radius_z
 
     if a <= 0 or b <= 0:
         return None
 
-    # Calculate the elliptical radius at this angle
     cos_theta = math.cos(angle)
     sin_theta = math.sin(angle)
 
@@ -778,22 +627,9 @@ def is_point_inside_fuselage(x: float, y: float, z: float,
                              bounds: FuselageBounds,
                              safety_factor: float = OptConfig.SAFETY_MARGIN,
                              debug: bool = False) -> bool:
-    """
-    Check if a point is inside the fuselage by comparing to surface distance.
-
-    Args:
-        x, y, z: Point coordinates to check
-        bounds: Fuselage geometry information
-        safety_factor: Multiplier for surface distance to provide safety margin
-        debug: Enable debug output
-
-    Returns:
-        True if point is inside fuselage, False otherwise
-    """
-    # Convert point X to U parameter along fuselage
+    """Check if a point is inside the fuselage."""
     u = x_to_u(x, bounds)
 
-    # Find the closest cross-section to this U position
     target_cs = None
     min_u_diff = float('inf')
 
@@ -806,25 +642,18 @@ def is_point_inside_fuselage(x: float, y: float, z: float,
     if target_cs is None:
         return False
 
-    # Calculate vector from fuselage center to point
     dy = y - target_cs.center_y
     dz = z - target_cs.center_z
 
-    # Calculate angle of point relative to fuselage center
     angle = math.atan2(dz, dy) if dy != 0 or dz != 0 else 0
 
-    # Find distance to fuselage surface at this angle
     surface_dist = find_surface_distance_at_angle(target_cs, angle)
     if surface_dist is None:
         return False
 
-    # Calculate actual distance from center to point
     point_dist = math.sqrt(dy * dy + dz * dz)
-
-    # Apply safety margin to surface distance
     safe_surface_dist = surface_dist * safety_factor
 
-    # Point is inside if its distance is less than the safe surface distance
     return point_dist <= safe_surface_dist
 
 
@@ -832,129 +661,70 @@ def is_box_inside_fuselage(volume: BoxVolume,
                            bounds: FuselageBounds,
                            safety_factor: float = OptConfig.SAFETY_MARGIN,
                            debug: bool = False) -> bool:
-    """
-    Check if a box volume is fully contained within the fuselage.
-    Verifies multiple surface points against actual fuselage geometry.
-
-    Args:
-        volume: Box volume to check
-        bounds: Fuselage geometry information
-        safety_factor: Safety margin for placement
-        debug: Enable debug output
-
-    Returns:
-        True if all box points are inside fuselage, False otherwise
-    """
-    # Quick rejection: check longitudinal bounds first
+    """Check if a box volume is fully contained within the fuselage."""
     if (volume.x - volume.half_length < bounds.x_min + bounds.length * OptConfig.LONGITUDINAL_MARGIN or
             volume.x + volume.half_length > bounds.x_max - bounds.length * OptConfig.LONGITUDINAL_MARGIN):
         if debug:
             print(f"    DEBUG: Volume {volume.id} failed longitudinal bounds check")
         return False
 
-    # Generate multiple test points on the box surface
     test_points = generate_box_surface_points(volume, points_per_edge=3)
 
-    # Check each test point against fuselage surface
     for i, (vx, vy, vz) in enumerate(test_points):
         if not is_point_inside_fuselage(vx, vy, vz, bounds, safety_factor, debug):
             if debug:
                 print(f"    DEBUG: Volume {volume.id} test point {i} outside fuselage")
-                print(f"           Point ({vx:.3f}, {vy:.3f}, {vz:.3f})")
             return False
 
     return True
 
 
 def boxes_collide(v1: BoxVolume, v2: BoxVolume, margin: float = OptConfig.COLLISION_MARGIN) -> bool:
-    """
-    Check if two box volumes collide using axis-aligned bounding box detection.
-
-    Args:
-        v1: First box volume
-        v2: Second box volume
-        margin: Safety margin multiplier for collision detection
-
-    Returns:
-        True if boxes collide, False otherwise
-    """
-    # Check for separation along each axis with safety margin
+    """Check if two box volumes collide."""
     x_overlap = (abs(v1.x - v2.x) < (v1.half_length + v2.half_length) * margin)
     y_overlap = (abs(v1.y - v2.y) < (v1.half_width + v2.half_width) * margin)
     z_overlap = (abs(v1.z - v2.z) < (v1.half_height + v2.half_height) * margin)
 
-    # Collision occurs if there's overlap in all three axes
     return x_overlap and y_overlap and z_overlap
 
 
 def surface_distance_between_boxes(v1: BoxVolume, v2: BoxVolume) -> float:
-    """
-    Calculate the minimum surface-to-surface distance between two box volumes.
-
-    Args:
-        v1: First box volume
-        v2: Second box volume
-
-    Returns:
-        Minimum distance between the surfaces of the two boxes
-    """
-    # Calculate separation along each axis
+    """Calculate the minimum surface-to-surface distance between two box volumes."""
     dx = abs(v1.x - v2.x)
     dy = abs(v1.y - v2.y)
     dz = abs(v1.z - v2.z)
 
-    # Calculate the minimum distance needed for the boxes to touch
     min_touch_distance_x = v1.half_length + v2.half_length
     min_touch_distance_y = v1.half_width + v2.half_width
     min_touch_distance_z = v1.half_height + v2.half_height
 
-    # Calculate surface-to-surface distance along each axis
     surface_dist_x = max(0.0, dx - min_touch_distance_x)
     surface_dist_y = max(0.0, dy - min_touch_distance_y)
     surface_dist_z = max(0.0, dz - min_touch_distance_z)
 
-    # If boxes overlap in all dimensions, they're colliding (distance = 0)
     if surface_dist_x == 0 and surface_dist_y == 0 and surface_dist_z == 0:
         return 0.0
 
-    # Calculate Euclidean distance between the closest surface points
     return math.sqrt(surface_dist_x ** 2 + surface_dist_y ** 2 + surface_dist_z ** 2)
 
 
 def respects_distance_constraints(vol: BoxVolume, placed_volumes: List[BoxVolume], debug: bool = False) -> bool:
-    """
-    Check if a volume respects all its distance constraints with placed volumes.
-    Uses SURFACE-TO-SURFACE distance, not center-to-center.
-
-    Args:
-        vol: Volume to check constraints for
-        placed_volumes: List of already placed volumes
-        debug: Enable debug output
-
-    Returns:
-        True if all constraints are satisfied, False otherwise
-    """
+    """Check if a volume respects all its distance constraints with placed volumes."""
     if not vol.distance_constraints:
         return True
 
-    # Build dictionary for quick volume lookup by ID
     lookup = {v.id: v for v in placed_volumes}
 
-    # Check each distance constraint
     for target_id, min_dist in vol.distance_constraints:
         target = lookup.get(target_id)
         if target is None:
-            # If target not placed yet, constraint cannot be checked
             continue
 
-        # Skip self-constraint (shouldn't exist but check anyway)
         if target_id == vol.id:
             continue
 
-        # Calculate SURFACE-TO-SURFACE distance between volumes
         surface_dist = surface_distance_between_boxes(vol, target)
 
-        # Check if surface distance meets minimum requirement
         if surface_dist < min_dist:
             if debug:
                 print(f"    DEBUG: Volume {vol.id} violates distance constraint with Volume {target_id}")
@@ -968,29 +738,14 @@ def is_valid_placement(new_volume: BoxVolume,
                        placed_volumes: List[BoxVolume],
                        bounds: FuselageBounds,
                        debug: bool = False) -> bool:
-    """
-    Comprehensive validation for volume placement.
-    Combines fuselage containment, collision detection, and distance constraints.
-
-    Args:
-        new_volume: Volume to validate
-        placed_volumes: List of already placed volumes
-        bounds: Fuselage geometry information
-        debug: Enable debug output
-
-    Returns:
-        True if placement is valid, False otherwise
-    """
-    # Check if volume is completely inside fuselage
+    """Comprehensive validation for volume placement."""
     if not is_box_inside_fuselage(new_volume, bounds, OptConfig.SAFETY_MARGIN, debug):
         return False
 
-    # Check for collisions with already placed volumes
     for pv in placed_volumes:
         if boxes_collide(new_volume, pv):
             return False
 
-    # Check distance constraints with placed volumes
     if not respects_distance_constraints(new_volume, placed_volumes, debug):
         return False
 
@@ -1003,52 +758,32 @@ def is_valid_placement(new_volume: BoxVolume,
 def place_volumes_in_fuselage(bounds: FuselageBounds,
                               base_volumes: List[BoxVolume],
                               debug: bool = False) -> Tuple[List[BoxVolume], int]:
-    """
-    Attempt to place all volumes in the fuselage with random placement and validation.
-
-    Args:
-        bounds: Fuselage geometry information
-        base_volumes: List of volumes to place
-        debug: Enable debug output
-
-    Returns:
-        Tuple of (placed_volumes, num_skipped) where:
-        - placed_volumes: List of successfully placed volumes with positions
-        - num_skipped: Number of volumes that couldn't be placed
-    """
+    """Attempt to place all volumes in the fuselage with random placement and validation."""
     placed = []
     skipped = 0
 
-    # Sort volumes by size (largest first) for better placement success
     sorted_volumes = sorted(base_volumes,
                             key=lambda v: v.length * v.width * v.height,
                             reverse=True)
 
-    # Attempt to place each volume
     for base_vol in sorted_volumes:
         placed_successfully = False
         attempts = 0
 
-        # Try multiple random positions until successful or max attempts reached
         while attempts < OptConfig.MAX_PLACEMENT_ATTEMPTS and not placed_successfully:
-            # Generate random position within fuselage
             u = np.random.random()
             ry, rz, cy, cz = bounds.get_radius_at_u(u)
             x = bounds.x_min + u * bounds.length
 
-            # Calculate valid Y and Z ranges within cross-section with safety margin
             max_y = cy + ry * OptConfig.SAFETY_MARGIN - base_vol.half_width
             min_y = cy - ry * OptConfig.SAFETY_MARGIN + base_vol.half_width
             max_z = cz + rz * OptConfig.SAFETY_MARGIN - base_vol.half_height
             min_z = cz - rz * OptConfig.SAFETY_MARGIN + base_vol.half_height
 
-            # Check if valid position range exists
             if max_y > min_y and max_z > min_z:
-                # Generate random position within valid range
                 y = np.random.uniform(min_y, max_y)
                 z = np.random.uniform(min_z, max_z)
 
-                # Create volume instance with position
                 vol = BoxVolume(
                     id=base_vol.id,
                     x=x, y=y, z=z,
@@ -1058,14 +793,12 @@ def place_volumes_in_fuselage(bounds: FuselageBounds,
                     distance_constraints=base_vol.distance_constraints
                 )
 
-                # Validate placement against all constraints
                 if is_valid_placement(vol, placed, bounds, debug):
                     placed.append(vol)
                     placed_successfully = True
 
             attempts += 1
 
-        # Track volumes that couldn't be placed
         if not placed_successfully:
             skipped += 1
 
@@ -1073,19 +806,12 @@ def place_volumes_in_fuselage(bounds: FuselageBounds,
 
 
 def create_volumes_in_vsp(volumes: List[BoxVolume]):
-    """
-    Create physical box geometries in OpenVSP from placed volume data.
-
-    Args:
-        volumes: List of placed volumes with positions and dimensions
-    """
+    """Create physical box geometries in OpenVSP from placed volume data."""
     for vol in volumes:
-        # Create box geometry in OpenVSP
         box_id = vsp.AddGeom("Box", "")
         geom_name = f"Volume_{vol.id}"
         vsp.SetGeomName(box_id, geom_name)
 
-        # Set transformation parameters
         vsp.SetParmValUpdate(box_id, "Abs_Or_Relitive_flag", "XForm", 0)
         vsp.SetParmValUpdate(box_id, "Trans_Attach_Flag", "Attach", 0)
         vsp.SetParmValUpdate(box_id, "X_Location", "XForm", vol.x)
@@ -1093,7 +819,6 @@ def create_volumes_in_vsp(volumes: List[BoxVolume]):
         vsp.SetParmValUpdate(box_id, "Z_Location", "XForm", vol.z)
 
         try:
-            # Set box dimensions
             vsp.SetParmValUpdate(box_id, "Length", "Design", vol.length)
             vsp.SetParmValUpdate(box_id, "Width", "Design", vol.width)
             vsp.SetParmValUpdate(box_id, "Height", "Design", vol.height)
@@ -1107,32 +832,17 @@ def create_volumes_in_vsp(volumes: List[BoxVolume]):
 # Validation Functions
 # ====================
 def validate_configuration(volumes: List[BoxVolume], bounds: FuselageBounds) -> Tuple[bool, List[str]]:
-    """
-    Comprehensive validation of a complete volume configuration.
-
-    Args:
-        volumes: List of placed volumes to validate
-        bounds: Fuselage geometry information
-
-    Returns:
-        Tuple of (is_valid, error_messages) where:
-        - is_valid: True if configuration passes all checks
-        - error_messages: List of validation error descriptions
-    """
+    """Comprehensive validation of a complete volume configuration."""
     errors = []
 
-    # Validate each volume individually
     for i, vol in enumerate(volumes):
-        # Check if volume is inside fuselage
         if not is_box_inside_fuselage(vol, bounds, OptConfig.SAFETY_MARGIN):
             errors.append(f"Volume {vol.id} is outside fuselage bounds")
 
-        # Check for collisions with other volumes
         for j, other_vol in enumerate(volumes):
             if i != j and boxes_collide(vol, other_vol):
                 errors.append(f"Volume {vol.id} collides with Volume {other_vol.id}")
 
-        # Check distance constraints
         if not respects_distance_constraints(vol, volumes):
             errors.append(f"Volume {vol.id} violates distance constraints")
 
@@ -1140,179 +850,222 @@ def validate_configuration(volumes: List[BoxVolume], bounds: FuselageBounds) -> 
 
 
 # ====================
+# Configuration Generation Functions
+# ====================
+def generate_step_based_configurations() -> List[FuselageConfiguration]:
+    """
+    Generate all fuselage configurations based on step parameters.
+    Returns a list of all combinations within the specified ranges.
+    Total configurations = Length_values × Width_values
+    """
+    configs = []
+    config_id = 1
+
+    # Generate all length values
+    lengths = []
+    current = OptConfig.LENGTH_MIN
+
+    while current <= OptConfig.LENGTH_MAX + 1e-6:
+        lengths.append(current)
+        current += OptConfig.LENGTH_STEP
+
+    # Generate all width values (WIDTH = HEIGHT always)
+    widths = []
+    current = OptConfig.WIDTH_MIN
+    while current <= OptConfig.WIDTH_MAX + 1e-6:
+        widths.append(current)
+        current += OptConfig.WIDTH_STEP
+    # Create combinations: L × W
+    for length in lengths:
+        for width in widths:
+            height = width  # HEIGHT = WIDTH
+            config = FuselageConfiguration(
+                config_id=config_id,
+                length=round(length, 6),
+                width=round(width, 6),
+                height=round(height, 6)
+            )
+            configs.append(config)
+            config_id += 1
+    return configs
+
+
+# ====================
 # Main Optimization Functions
 # ====================
-def generate_perturbation_factors(config: type) -> List[Tuple[float, float, float]]:
-    """
-    Generate random perturbation factors for fuselage dimensions.
-
-    Args:
-        config: Configuration class with perturbation parameters
-
-    Returns:
-        List of (length_factor, width_factor, height_factor) tuples
-    """
-    # Note: Seed commented out for maximum exploration diversity
-    # np.random.seed(42)  # For reproducibility
-
-    factors = []
-    for i in range(config.NUM_CONFIGURATIONS):
-        # Generate random factors within perturbation range
-        length_factor = 1.0 + np.random.uniform(-config.LENGTH_PERTURBATION,
-                                                config.LENGTH_PERTURBATION)
-        width_factor = 1.0 + np.random.uniform(-config.WIDTH_PERTURBATION,
-                                               config.WIDTH_PERTURBATION)
-        height_factor = 1.0 + np.random.uniform(-config.HEIGHT_PERTURBATION,
-                                                config.HEIGHT_PERTURBATION)
-        factors.append((length_factor, width_factor, height_factor))
-
-    return factors
-
-
 def run_optimization():
-    """Main optimization loop that generates and evaluates fuselage configurations."""
-    print("=" * 70)
-    print("FUSELAGE VOLUME OPTIMIZATION - WITH COLLISION, CONSTRAINTS & AERODYNAMICS")
-    print("=" * 70)
+    """Main optimization loop - STEP-BASED approach."""
+    print("=" * 80)
+    print("FUSELAGE VOLUME OPTIMIZATION - STEP-BASED APPROACH")
+    print("Sequence: Configuration Generation → CD Evaluation → Volume Analysis → Scoring")
+    print(f"Weights: CD={OptConfig.CD_WEIGHT}, Volume={OptConfig.VOLUME_WEIGHT}")
+    print("=" * 80)
 
     # Create output directory structure
     os.makedirs(OptConfig.OUTPUT_DIR, exist_ok=True)
 
-    # Generate perturbation factors for fuselage dimensions
-    print(f"\n1. Generating {OptConfig.NUM_CONFIGURATIONS} perturbation factors...")
-    perturbation_factors = generate_perturbation_factors(OptConfig)
+    # Generate all configurations based on step parameters
+    print(f"\n1. Generating configurations with step-based parameters...")
+    all_configs = generate_step_based_configurations()
+    print(f"   Total configurations: {len(all_configs)}")
+    print(f"   Length range: {OptConfig.LENGTH_MIN}-{OptConfig.LENGTH_MAX}m (step: {OptConfig.LENGTH_STEP}m)")
+    print(f"   Radius range: {OptConfig.WIDTH_MIN/2}-{OptConfig.WIDTH_MAX/2}m (step: {OptConfig.WIDTH_STEP/2}m)")
 
-    # Load volume definitions with constraints
-    base_volumes = get_manual_volumes()
-    print(f"   Base volumes defined: {len(base_volumes)}")
+    # Load volume definitions from file (NO FALLBACK)
+    print(f"\n   Loading volume definitions...")
+    if not OptConfig.VOLUME_FILE or not os.path.exists(OptConfig.VOLUME_FILE):
+        print(f"   FATAL ERROR: Volume file not specified or not found.")
+        print(f"   Path: {OptConfig.VOLUME_FILE}")
+        print("   Aborting optimization.")
+        return  # Exit optimization
+
+    try:
+        base_volumes = load_volumes_from_file(OptConfig.VOLUME_FILE)
+        if not base_volumes:
+            print(f"   FATAL ERROR: Volume file was loaded but contained no volumes.")
+            print("   Aborting optimization.")
+            return
+    except Exception as e:
+        print(f"   FATAL ERROR: Failed to load or parse volume file: {e}")
+        print("   Aborting optimization.")
+        return
+
+    print(f"\n   Base volumes defined: {len(base_volumes)}")
     print(f"   Total distance constraints: {sum(len(v.distance_constraints) for v in base_volumes)}")
 
-    # Store all valid configurations
-    all_configs = []
+    # ========== STEP 1: CD ANALYSIS IN FEET ==========
+    print(f"\n2. Performing CD analysis on {len(all_configs)} configurations...")
+    print("   This may take several minutes...")
+    cd_analyzed_configs = []
 
-    print(f"\n2. Generating and evaluating configurations...")
-    valid_configs = 0
+    sys.stdout.flush()
 
-    # Process each configuration with progress bar
-    for i, (lf, wf, hf) in enumerate(tqdm(perturbation_factors,
-                                          desc="Configurations",
-                                          unit="config",
-                                          ncols=100)):
-        debug_mode = False  # Disable detailed debug output for performance
+    for config in tqdm(all_configs, desc="CD analysis", unit="config", ncols=100, ascii=True):
+        try:
+            # Convert to feet for CD analysis
+            length_feet = config.length * OptConfig.METERS_TO_FEET
+            width_feet = config.width * OptConfig.METERS_TO_FEET
+            height_feet = config.height * OptConfig.METERS_TO_FEET
 
-        # Create fuselage with perturbed dimensions
-        fuse_id = create_perturbed_fuselage(
-            OptConfig.BASE_LENGTH, OptConfig.BASE_WIDTH, OptConfig.BASE_HEIGHT,
-            (lf, wf, hf)
-        )
+            # Create fuselage in feet for CD analysis
+            fuse_id = create_fuselage_in_feet(length_feet, width_feet, height_feet)
 
-        # Analyze fuselage geometry for volume placement
-        bounds = analyze_fuselage_geometry(fuse_id)
+            # Run parasite drag analysis
+            cd_value = run_parasite_drag_analysis_feet(fuse_id)
+            config.cd_value = cd_value
 
-        # Compute fuselage volume using OpenVSP
-        fuse_volume = compute_fuselage_volume_compgeom()
+            if cd_value > 0:
+                cd_analyzed_configs.append(config)
 
-        # Attempt to place all volumes with constraints
-        placed_volumes, num_skipped = place_volumes_in_fuselage(
-            bounds, base_volumes, debug=debug_mode
-        )
+        except Exception as e:
+            print(f"Warning: CD analysis failed for config {config.config_id}: {e}")
+            continue
+    print()
+    print(f"   Successful CD analyses: {len(cd_analyzed_configs)}/{len(all_configs)}")
 
-        # Only consider configurations where ALL volumes are successfully placed
-        if num_skipped == 0:
-            # Final validation to ensure configuration integrity
-            is_valid, validation_errors = validate_configuration(placed_volumes, bounds)
+    # ========== STEP 2: SELECT BEST CD CONFIGURATIONS ==========
+    cd_analyzed_configs.sort(key=lambda c: c.cd_value)
+    top_n = min(OptConfig.TOP_N_CD, len(cd_analyzed_configs))
+    top_cd_configs = cd_analyzed_configs[:top_n]
 
-            if is_valid:
-                # Calculate volume metrics
-                total_boxes_volume = sum([v.length * v.width * v.height for v in placed_volumes])
+    print(f"\n3. Selected top {top_n} configurations by CD for volume analysis")
+    print(f"   CD range: {top_cd_configs[0].cd_value:.5f} to {top_cd_configs[-1].cd_value:.5f}")
 
-                # Create configuration object
-                config = FuselageConfiguration(
-                    config_id=i + 1,
-                    length=OptConfig.BASE_LENGTH * lf,
-                    width=OptConfig.BASE_WIDTH * wf,
-                    height=OptConfig.BASE_HEIGHT * hf,
-                    fuselage_volume=fuse_volume,
-                    volumes_placed=placed_volumes,
-                    total_volumes_volume=total_boxes_volume,
-                    remaining_volume=fuse_volume - total_boxes_volume,
-                    num_volumes_skipped=num_skipped,
-                    bounds=bounds  # Store bounds for saving phase
-                )
-
-                all_configs.append(config)
-                valid_configs += 1
-            elif debug_mode:
-                # Log validation failures for debugging
-                print(f"\n   Config {i + 1} failed validation: {validation_errors}")
-
-    print(f"\n3. Valid configurations found: {valid_configs}/{OptConfig.NUM_CONFIGURATIONS}")
-
-    if valid_configs == 0:
-        print("   No valid configurations found! Exiting.")
+    if not top_cd_configs:
+        print("No configurations passed CD analysis! Exiting.")
         return
 
-    print(f"   Ranking configurations by fuselage volume...")
-    # Sort configurations by fuselage volume (ascending) to find minimum volume designs
-    all_configs.sort(key=lambda c: c.fuselage_volume)
+    # ========== STEP 3: VOLUME ANALYSIS ON TOP CD CONFIGS ==========
+    print(f"\n4. Performing volume analysis on top {len(top_cd_configs)} CD configurations...")
+    print("   Analyzing fuselage geometry and placing volumes...")
+    valid_volume_configs = []
 
-    # Select top N configurations for aerodynamic analysis
-    top_n_volume = min(OptConfig.TOP_N_VOLUME, len(all_configs))
-    top_volume_configs = all_configs[:top_n_volume]
+    sys.stdout.flush()
 
-    print(f"\n4. Selected top {top_n_volume} configurations by volume for aerodynamic analysis")
+    for config in tqdm(top_cd_configs, desc="Volume analysis", unit="config", ncols=100, ascii=True):
+        try:
+            # Create fuselage in meters for volume analysis
+            fuse_id = create_fuselage_from_dimensions(config.length, config.width, config.height)
 
-    aero_configs = perform_aerodynamic_analysis(top_volume_configs)
+            # Analyze fuselage geometry for volume placement
+            bounds = config.bounds = analyze_fuselage_geometry(fuse_id)
 
-    if not aero_configs:
-        print("   No configurations passed aerodynamic filtering! Exiting.")
+            # Compute fuselage volume
+            fuse_volume = compute_fuselage_volume_compgeom()
+            config.fuselage_volume = fuse_volume
+
+            # Attempt to place all volumes
+            placed_volumes, num_skipped = place_volumes_in_fuselage(bounds, base_volumes, debug=False)
+
+            if num_skipped == 0:
+                is_valid, validation_errors = validate_configuration(placed_volumes, bounds)
+
+                if is_valid:
+                    total_boxes_volume = sum([v.length * v.width * v.height for v in placed_volumes])
+
+                    config.volumes_placed = placed_volumes
+                    config.total_volumes_volume = total_boxes_volume
+                    config.remaining_volume = fuse_volume - total_boxes_volume
+                    config.num_volumes_skipped = num_skipped
+
+                    valid_volume_configs.append(config)
+
+        except Exception as e:
+            print(f"Warning: Volume analysis failed for config {config.config_id}: {e}")
+            continue
+
+    if not valid_volume_configs:
+        print("   No configurations passed volume placement validation! Exiting.")
         return
+    print()
+    print(f"   Successfully placed volumes in {len(valid_volume_configs)} configurations")
 
-    print(f"\n5. Ranking configurations by combined score...")
-    # Sort by combined score (lower is better)
-    aero_configs.sort(key=lambda c: c.combined_score)
+    # ========== STEP 4: COMBINED SCORING ==========
+    print(f"\n5. Computing combined scores...")
+    for config in valid_volume_configs:
+        config.combined_score = calculate_combined_score(
+            config.cd_value,
+            config.fuselage_volume,
+            config.length,
+            config.width,
+            config.height,
+            OptConfig.CD_WEIGHT,
+            OptConfig.VOLUME_WEIGHT
+        )
 
-    # Select final top N configurations
-    top_n_final = min(OptConfig.TOP_N_FINAL, len(aero_configs))
-    top_configs = aero_configs[:top_n_final]
+    valid_volume_configs.sort(key=lambda c: c.combined_score)
+
+    top_n_final = min(OptConfig.TOP_N_FINAL, len(valid_volume_configs))
+    top_configs = valid_volume_configs[:top_n_final]
 
     print(f"\n6. Saving top {top_n_final} configurations...")
     top_dir = os.path.join(OptConfig.OUTPUT_DIR, "top_configurations")
     os.makedirs(top_dir, exist_ok=True)
+    print("   Creating output directory structure...")
+    sys.stdout.flush()
 
-    # Save each top configuration with progress tracking
-    for rank, config in enumerate(tqdm(top_configs, desc="Saving configs", unit="file", ncols=100), 1):
+    for rank, config in enumerate(tqdm(top_configs, desc="Saving configs", unit="file", ncols=100, ascii=True), 1):
         conf_dir = os.path.join(top_dir, f"rank_{rank:02d}_config_{config.config_id}")
         os.makedirs(conf_dir, exist_ok=True)
 
-        # Recreate fuselage geometry for saving (using validated positions)
-        fuse_id = create_perturbed_fuselage(
-            OptConfig.BASE_LENGTH, OptConfig.BASE_WIDTH, OptConfig.BASE_HEIGHT,
-            (config.length / OptConfig.BASE_LENGTH,
-             config.width / OptConfig.BASE_WIDTH,
-             config.height / OptConfig.BASE_HEIGHT)
-        )
-
-        # Create volumes using previously validated positions
+        # Recreate fuselage geometry for saving (in meters)
+        fuse_id = create_fuselage_from_dimensions(config.length, config.width, config.height)
         create_volumes_in_vsp(config.volumes_placed)
-
         vsp.Update()
 
-        # Final validation before saving to ensure data consistency
         current_bounds = analyze_fuselage_geometry(fuse_id)
         is_valid, validation_errors = validate_configuration(config.volumes_placed, current_bounds)
 
         if not is_valid:
             print(f"\n   WARNING: Configuration {config.config_id} failed final validation!")
-            print(f"   Errors: {validation_errors}")
-            continue  # Skip saving invalid configurations
+            continue
 
-        # Save VSP file with complete geometry (fuselage with volumes)
+        # Save VSP file with complete geometry (meters)
         vsp_file = os.path.join(conf_dir, f"fuselage_rank_{rank:02d}_with_volumes.vsp3")
         vsp.WriteVSPFile(vsp_file, vsp.SET_ALL)
         config.vsp_file = vsp_file
 
-        # Save empty fuselage (in feet) for accurate aerodynamic analysis
+        # Save empty fuselage (in feet) for reference
         length_feet = config.length * OptConfig.METERS_TO_FEET
         width_feet = config.width * OptConfig.METERS_TO_FEET
         height_feet = config.height * OptConfig.METERS_TO_FEET
@@ -1336,71 +1089,57 @@ def run_optimization():
         save_constraints_csv(config.volumes_placed, base_volumes, conf_dir)
 
     # Save optimization summary
-    print(f"\n7. Saving summary CSV...")
+    print(f"\n7. Saving summary CSV files...")
     summary_csv = os.path.join(OptConfig.OUTPUT_DIR, "optimization_summary.csv")
     with open(summary_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["Rank", "Config_ID", "Length_m", "Width_m", "Height_m",
-                         "Fuselage_Volume_m3", "Boxes_Volume_m3", "Remaining_Volume_m3",
-                         "CD_Value", "Combined_Score",
-                         "Num_Volumes_Placed", "Num_Volumes_Skipped"])
+                         "Fuselage_Volume_m3", "CD_Value", "Combined_Score"])
 
         for rank, config in enumerate(top_configs, 1):
             writer.writerow([
                 rank, config.config_id,
                 f"{config.length:.3f}", f"{config.width:.3f}", f"{config.height:.3f}",
-                f"{config.fuselage_volume:.3f}", f"{config.total_volumes_volume:.3f}",
-                f"{config.remaining_volume:.3f}",
-                f"{config.cd_value:.5f}", f"{config.combined_score:.5f}",
-                len(config.volumes_placed), config.num_volumes_skipped
+                f"{config.fuselage_volume:.3f}",
+                f"{config.cd_value:.5f}", f"{config.combined_score:.5f}"
             ])
 
-    # Save aerodynamic analysis results for all analyzed configurations
-    aero_csv = os.path.join(OptConfig.OUTPUT_DIR, "aerodynamic_analysis.csv")
+    # Save aerodynamic analysis results
+    aero_csv = os.path.join(OptConfig.OUTPUT_DIR, "cd_analysis_all_configs.csv")
     with open(aero_csv, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["Config_ID", "Length_m", "Width_m", "Height_m",
-                         "Fuselage_Volume_m3", "CD_Value", "Combined_Score",
-                         "Passed_CD_Threshold"])
+        writer.writerow(["Config_ID", "Length_m", "Width_m", "Height_m", "CD_Value", "Rank_by_CD"])
 
-        for config in aero_configs:
-            passed = "YES" if config.cd_value <= OptConfig.CD_THRESHOLD else "NO"
+        for rank, config in enumerate(sorted(cd_analyzed_configs, key=lambda c: c.cd_value), 1):
             writer.writerow([
                 config.config_id,
                 f"{config.length:.3f}", f"{config.width:.3f}", f"{config.height:.3f}",
-                f"{config.fuselage_volume:.3f}", f"{config.cd_value:.5f}",
-                f"{config.combined_score:.5f}", passed
+                f"{config.cd_value:.5f}", rank
             ])
 
     # Generate analysis plots
     print(f"\n8. Generating visualizations...")
-    generate_plots(all_configs, top_configs, aero_configs)
+    generate_plots(cd_analyzed_configs, top_configs, valid_volume_configs)
 
     # Print completion message
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 80)
     print("OPTIMIZATION COMPLETE!")
     print(f"Results saved to: {OptConfig.OUTPUT_DIR}")
     print(f"Top {top_n_final} configurations in: {top_dir}")
-    print("=" * 70)
+    print("=" * 80)
 
     # Display top 5 configuration summary
-    print("\nTop 5 configurations by combined score:")
-    print("-" * 70)
+    print("\nTop configurations by combined score:")
+    print("-" * 80)
     for i, config in enumerate(top_configs[:5], 1):
-        print(f"{i}. Config {config.config_id}: Combined Score = {config.combined_score:.4f}")
-        print(f"   Volume = {config.fuselage_volume:.3f} m³, CD = {config.cd_value:.5f}")
-        print(f"   L={config.length:.2f}m, W={config.width:.2f}m, H={config.height:.2f}m")
+        print(f"{i}. Config {config.config_id}: Combined Score = {config.combined_score:.5f}")
+        print(f"   CD = {config.cd_value:.5f}, Volume = {config.fuselage_volume:.3f} m³")
+        print(f"   L={config.length:.3f}m, W={config.width:.3f}m, H={config.height:.3f}m")
         print(f"   Volumes: {len(config.volumes_placed)} placed, {config.num_volumes_skipped} skipped")
 
 
 def save_volumes_positions_csv(placed_volumes: List[BoxVolume], conf_dir: str):
-    """
-    Save volume positions and dimensions to CSV file.
-
-    Args:
-        placed_volumes: List of placed volumes with positions
-        conf_dir: Directory to save CSV file in
-    """
+    """Save volume positions and dimensions to CSV file."""
     csv_file = os.path.join(conf_dir, "volumes_positions.csv")
 
     with open(csv_file, "w", newline="") as f:
@@ -1410,40 +1149,29 @@ def save_volumes_positions_csv(placed_volumes: List[BoxVolume], conf_dir: str):
         for vol in placed_volumes:
             writer.writerow([
                 vol.id,
-                f"{vol.x:.4f}",
-                f"{vol.y:.4f}",
-                f"{vol.z:.4f}",
-                f"{vol.length:.4f}",
-                f"{vol.width:.4f}",
-                f"{vol.height:.4f}"
+                f"{vol.x:.3f}",
+                f"{vol.y:.3f}",
+                f"{vol.z:.3f}",
+                f"{vol.length:.3f}",
+                f"{vol.width:.3f}",
+                f"{vol.height:.3f}"
             ])
 
 
 def save_constraints_csv(placed_volumes: List[BoxVolume],
                          all_volumes: List[BoxVolume],
                          conf_dir: str):
-    """
-    Save distance constraint verification results to CSV file.
-    Uses SURFACE-TO-SURFACE distance.
-
-    Args:
-        placed_volumes: List of successfully placed volumes
-        all_volumes: All volume definitions including constraints
-        conf_dir: Directory to save CSV file in
-    """
+    """Save distance constraint verification results to CSV file."""
     csv_file = os.path.join(conf_dir, "distance_constraints.csv")
 
     placed_ids = {vol.id for vol in placed_volumes}
     placed_lookup = {vol.id: vol for vol in placed_volumes}
-    all_lookup = {vol.id: vol for vol in all_volumes}
 
-    # Collect all unique constraints (remove duplicates for bidirectional constraints)
     unique_constraints = {}
     for volume in all_volumes:
         for target_id, min_distance in volume.distance_constraints:
             pair_key = tuple(sorted([volume.id, target_id]))
             if pair_key in unique_constraints:
-                # Keep the more restrictive (smaller) distance constraint
                 existing_min_dist = unique_constraints[pair_key][2]
                 unique_constraints[pair_key] = (
                     pair_key[0], pair_key[1], min(existing_min_dist, min_distance)
@@ -1466,7 +1194,6 @@ def save_constraints_csv(placed_volumes: List[BoxVolume],
             both_placed = "YES" if (vol1_id in placed_ids and vol2_id in placed_ids) else "NO"
 
             if both_placed == "YES":
-                # Calculate ACTUAL SURFACE-TO-SURFACE distance between placed volumes
                 vol1 = placed_lookup[vol1_id]
                 vol2 = placed_lookup[vol2_id]
                 actual_dist = surface_distance_between_boxes(vol1, vol2)
@@ -1483,121 +1210,183 @@ def save_constraints_csv(placed_volumes: List[BoxVolume],
             ])
 
 
-def generate_plots(all_configs: List[FuselageConfiguration],
-                   top_configs: List[FuselageConfiguration],
-                   aero_configs: List[FuselageConfiguration]):
+def load_volumes_from_file(filepath: str) -> List[BoxVolume]:
     """
-    Generate analysis plots for optimization results.
-
+    Load volume definitions from an external JSON file.
     Args:
-        all_configs: All valid configurations found
-        top_configs: Top N configurations selected
-        aero_configs: Configurations that passed aerodynamic analysis
+        filepath: Path to the JSON file.
+    Returns:
+        List of BoxVolume objects.
     """
-    # Extract data for plotting
-    all_volumes = [c.fuselage_volume for c in all_configs]
+    print(f"   Parsing volume file: {filepath}")
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+
+        volumes = []
+        for item in data:
+            # Convert constraint list [id, dist] to tuple (id, dist)
+            constraints = [
+                tuple(c) for c in item.get('distance_constraints', [])
+            ]
+
+            vol = BoxVolume(
+                id=item['id'],
+                length=item['length'],
+                width=item['width'],
+                height=item['height'],
+                distance_constraints=constraints
+            )
+            volumes.append(vol)
+
+        if not volumes:
+            print("   WARNING: Volume file was empty or invalid. No volumes loaded.")
+        return volumes
+
+    except json.JSONDecodeError as e:
+        print(f"   ERROR: Could not parse volume file (invalid JSON): {e}")
+        raise ValueError(f"Invalid JSON in {filepath}") from e
+    except KeyError as e:
+        print(f"   ERROR: Volume file is missing required key: {e}")
+        raise ValueError(f"Missing key {e} in {filepath}") from e
+    except Exception as e:
+        print(f"   ERROR: Failed to load volumes from file: {e}")
+        raise
+
+def generate_plots(all_cd_configs: List[FuselageConfiguration],
+                   top_configs: List[FuselageConfiguration],
+                   volume_configs: List[FuselageConfiguration]):
+    """Generate analysis plots for step-based optimization results."""
+    all_cds = [c.cd_value for c in all_cd_configs]
+    top_cds = [c.cd_value for c in top_configs]
+
+    volume_data_cds = [c.cd_value for c in volume_configs]
+    volume_data_volumes = [c.fuselage_volume for c in volume_configs]
     top_volumes = [c.fuselage_volume for c in top_configs]
-    all_boxes = [c.total_volumes_volume for c in all_configs]
-    top_boxes = [c.total_volumes_volume for c in top_configs]
-    all_placed = [len(c.volumes_placed) for c in all_configs]
-    top_placed = [len(c.volumes_placed) for c in top_configs]
 
-    # Aerodynamic data
-    aero_volumes = [c.fuselage_volume for c in aero_configs]
-    aero_cd = [c.cd_value for c in aero_configs]
-    top_cd = [c.cd_value for c in top_configs]
+    top_scores = [c.combined_score for c in top_configs]
 
-    # Create figure with 2x3 subplots
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-    # 1. Distribution of all fuselage volumes
+    # 1. Distribution of CD values
     ax1 = axes[0, 0]
-    ax1.hist(all_volumes, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
-    if top_volumes:
-        ax1.axvline(np.mean(top_volumes), color='red', linestyle='--',
-                    label=f'Top {len(top_configs)} mean')
-    ax1.set_xlabel('Fuselage Volume (m³)')
+    ax1.hist(all_cds, bins=20, alpha=0.7, color='lightblue', edgecolor='black')
+    if top_cds:
+        ax1.axvline(np.mean(top_cds), color='red', linestyle='--',
+                    label=f'Top {len(top_configs)} mean CD')
+    ax1.set_xlabel('Drag Coefficient (CD)')
     ax1.set_ylabel('Count')
-    ax1.set_title('Distribution of Fuselage Volumes (Valid Configs Only)')
+    ax1.set_title('CD Distribution - All Configurations')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # 2. Volumes placed distribution
+    # 2. Top configurations ranked by combined score
     ax2 = axes[0, 1]
-    ax2.hist(all_placed, bins=range(0, OptConfig.NUM_VOLUMES + 2),
-             alpha=0.7, color='lightgreen', edgecolor='black')
-    if top_placed:
-        ax2.axvline(np.mean(top_placed), color='red', linestyle='--',
-                    label=f'Top {len(top_configs)} mean')
-    ax2.set_xlabel('Number of Volumes Placed')
-    ax2.set_ylabel('Count')
-    ax2.set_title('Distribution of Successfully Placed Volumes')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+    config_ids = [f"Config {c.config_id}" for c in top_configs]
+    bars = ax2.barh(config_ids, top_scores, color='steelblue', edgecolor='black')
+    ax2.set_xlabel('Combined Score')
+    ax2.set_title(f'Top {len(top_configs)} Configurations by Combined Score')
+    ax2.invert_yaxis()
+    for i, (bar, config) in enumerate(zip(bars, top_configs)):
+        ax2.text(bar.get_width(), bar.get_y() + bar.get_height()/2,
+                f' CD:{config.cd_value:.4f}', va='center', fontsize=9)
+    ax2.grid(True, alpha=0.3, axis='x')
 
-    # 3. Scatter: Fuselage volume vs Boxes volume
-    ax3 = axes[1, 0]
-    ax3.scatter(all_volumes, all_boxes, alpha=0.5, s=30, label='All valid configs')
-    if top_volumes and top_boxes:
-        ax3.scatter(top_volumes, top_boxes, color='red', s=50,
-                    label=f'Top {len(top_configs)}', edgecolor='black', linewidth=1)
-    ax3.set_xlabel('Fuselage Volume (m³)')
-    ax3.set_ylabel('Total Boxes Volume (m³)')
-    ax3.set_title('Fuselage Volume vs Placed Boxes Volume')
+    # 3. CD vs Volume scatter
+    ax3 = axes[0, 2]
+    ax3.scatter(top_cds, top_volumes, color='red', s=100,
+        label=f'Top {len(top_configs)}', edgecolor='black', linewidth=2, marker='*')
+    ax3.set_xlabel('Drag Coefficient (CD) - PRIMARY METRIC')
+    ax3.set_ylabel('Fuselage Volume (m³)')
+    ax3.set_title('CD vs Volume (CD dominates scoring)')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
 
-    # 4. Scatter: Fuselage volume vs Number of volumes placed
-    ax4 = axes[1, 1]
-    ax4.scatter(all_volumes, all_placed, alpha=0.5, s=30, label='All valid configs')
-    if top_volumes and top_placed:
-        ax4.scatter(top_volumes, top_placed, color='red', s=50,
-                    label=f'Top {len(top_configs)}', edgecolor='black', linewidth=1)
-    ax4.set_xlabel('Fuselage Volume (m³)')
-    ax4.set_ylabel('Volumes Successfully Placed')
-    ax4.set_title('Fuselage Volume vs Placement Success')
+    # 4. CD ranking - showing selection process
+    ax4 = axes[1, 0]
+    sorted_cd_configs = sorted(all_cd_configs, key=lambda c: c.cd_value)
+    ranks = range(1, len(sorted_cd_configs) + 1)
+    cds = [c.cd_value for c in sorted_cd_configs]
+    ax4.plot(ranks, cds, marker='o', linestyle='-', alpha=0.7, label='All configs')
+    top_n = min(OptConfig.TOP_N_CD, len(sorted_cd_configs))
+    ax4.axvline(x=top_n, color='red', linestyle='--', label=f'Top {top_n} selected for volume analysis')
+    ax4.fill_between(range(1, top_n + 1), 0, max(cds), alpha=0.2, color='green')
+    ax4.set_xlabel('Configuration Rank (by CD)')
+    ax4.set_ylabel('CD Value')
+    ax4.set_title('CD-based Selection Process')
     ax4.legend()
     ax4.grid(True, alpha=0.3)
 
-    # 5. Volume vs CD scatter plot (Aerodynamic analysis)
-    ax5 = axes[0, 2]
-    if aero_volumes and aero_cd:
-        ax5.scatter(aero_volumes, aero_cd, alpha=0.6, s=40,
-                    c=aero_volumes, cmap='viridis', label='All aero configs')
-        if top_volumes and top_cd:
-            ax5.scatter(top_volumes, top_cd, color='red', s=80,
-                        label=f'Top {len(top_configs)}', edgecolor='black', linewidth=2)
-        ax5.axhline(y=OptConfig.CD_THRESHOLD, color='r', linestyle='--',
-                    label=f'CD threshold ({OptConfig.CD_THRESHOLD})')
-        ax5.set_xlabel('Fuselage Volume (m³)')
-        ax5.set_ylabel('Drag Coefficient (CD)')
-        ax5.set_title('Volume vs Drag Coefficient (Empty Fuselage)')
-        ax5.legend()
-        ax5.grid(True, alpha=0.3)
+    # 5. Score components breakdown
+    ax5 = axes[1, 1]
+    if top_configs:
+        config_labels = [f"C{c.config_id}" for c in top_configs]
+        cd_contributions = [c.cd_value / OptConfig.CD_THRESHOLD * 0.7 for c in top_configs]
+        volume_contributions = []
 
-    # 6. Histogram of CD values
+        for c in top_configs:
+            theoretical_vol = c.length * c.width * c.height
+            vol_norm = c.fuselage_volume / theoretical_vol
+            volume_contributions.append(vol_norm * 0.3)
+
+        x_pos = np.arange(len(config_labels))
+        width = 0.35
+
+        bars1 = ax5.bar(x_pos - width/2, cd_contributions, width, label='CD component',
+                       color='#FF6B6B', alpha=0.8, edgecolor='black')
+        bars2 = ax5.bar(x_pos + width/2, volume_contributions, width, label='Volume component',
+                       color='#4ECDC4', alpha=0.8, edgecolor='black')
+
+        ax5.set_ylabel('Score Component Value')
+        ax5.set_title('Score Breakdown')
+        ax5.set_xticks(x_pos)
+        ax5.set_xticklabels(config_labels)
+        ax5.legend()
+        ax5.grid(True, alpha=0.3, axis='y')
+
+    # 6. Summary metrics
     ax6 = axes[1, 2]
-    if aero_cd:
-        ax6.hist(aero_cd, bins=20, alpha=0.7, color='orange', edgecolor='black')
-        ax6.axvline(OptConfig.CD_THRESHOLD, color='r', linestyle='--',
-                    label=f'CD threshold ({OptConfig.CD_THRESHOLD})')
-        if top_cd:
-            ax6.axvline(np.mean(top_cd), color='green', linestyle='--',
-                        label=f'Top {len(top_configs)} mean')
-        ax6.set_xlabel('Drag Coefficient (CD)')
-        ax6.set_ylabel('Count')
-        ax6.set_title('Distribution of Drag Coefficients (Empty Fuselage)')
-        ax6.legend()
-        ax6.grid(True, alpha=0.3)
+    ax6.axis('off')
+
+    summary_text = f"""
+OPTIMIZATION SUMMARY (STEP-BASED APPROACH)
+
+Initial Configurations: {len(all_cd_configs)}
+After Volume Placement: {len(volume_configs)}
+Final Top-N: {len(top_configs)}
+
+CD Analysis:
+  • Best CD: {min(all_cds):.5f}
+  • Worst CD: {max(all_cds):.5f}
+  • Threshold: {OptConfig.CD_THRESHOLD:.5f}
+
+Top Configuration:
+  • Config ID: {top_configs[0].config_id if top_configs else 'N/A'}
+  • CD: {top_configs[0].cd_value:.5f}
+  • Volume: {top_configs[0].fuselage_volume:.3f} m³
+  • Score: {top_configs[0].combined_score:.5f}
+
+Weights Applied:
+  • CD Weight: {OptConfig.CD_WEIGHT}
+  • Volume Weight: {OptConfig.VOLUME_WEIGHT}
+
+Step Parameters:
+  • Length: {OptConfig.LENGTH_MIN}-{OptConfig.LENGTH_MAX}m (step {OptConfig.LENGTH_STEP}m)
+  • Radius: {OptConfig.WIDTH_MIN/2}-{OptConfig.WIDTH_MAX/2}m (step {OptConfig.WIDTH_STEP/2}m)
+    """
+
+    ax6.text(0.05, 0.95, summary_text, transform=ax6.transAxes,
+            fontsize=9, verticalalignment='top', fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
 
     # Save plot to file
-    plot_file = os.path.join(OptConfig.OUTPUT_DIR, "optimization_analysis.png")
+    plot_file = os.path.join(OptConfig.OUTPUT_DIR, "step_based_optimization_analysis.png")
     plt.savefig(plot_file, dpi=150, bbox_inches='tight')
     print(f"   Saved plot: {plot_file}")
 
-    plt.show()
+    plt.close()
 
 
 # ====================
