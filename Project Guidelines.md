@@ -13,6 +13,7 @@ For each project, there will be a main project folder containing:
 
 ### Branching
 - **`main`** → stable code only, fully reviewed
+- **`feature/taskX`** -> branch used by all the contributors for the task
 - **`feature/taskX-username`** → work on a specific task. Replace `X` with task number and `username` with your GitHub username. Example: `feature/task1-shayaan`
 
 ### Issues
